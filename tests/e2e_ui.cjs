@@ -177,10 +177,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       await sp.keyboard.press('Escape');
       await sp.waitForFunction(() => !document.querySelector('#productModal.open'));
       await sp.waitForFunction(() => location.pathname === '/');
-      // deep link opens the modal directly
+      // a product link is now a real server-rendered page (it no longer re-opens the quick view on the home page)
       await sp.goto(base + '/product/wavy-03');
-      await sp.waitForSelector('#productModal.open');
-      assert.ok((await sp.textContent('#productModalTitle')).includes('موديل 3'));
+      await sp.waitForSelector('#productTitle');
+      assert.ok((await sp.textContent('#productTitle')).includes('موديل 3'));
+      await sp.waitForLoadState('networkidle'); await sp.waitForTimeout(300);
+      assert.strictEqual(await sp.locator('#productModal.open').count(), 0, 'quick view stays closed on the product page');
       await sp.close();
     })();
     await check('admin categories: add with image, reorder, edit, delete', async () => {

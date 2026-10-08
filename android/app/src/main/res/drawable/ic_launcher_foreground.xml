@@ -11,7 +11,7 @@
         android:translateY="25.2">
         <path
             android:pathData="M4,18V6l8,6 8,-6v12M8,18v-5M16,18v-5"
-            android:strokeColor="#F8F4EC"
+            android:strokeColor="#EAD6A6"
             android:strokeWidth="1.8"
             android:strokeLineCap="round"
             android:strokeLineJoin="round" />

@@ -12,6 +12,8 @@ const freePort = () => new Promise(r => { const s = net.createServer(); s.listen
   for (let i = 0; i < 100; i++) { try { await fetch(`http://127.0.0.1:${port}/api/health`); break; } catch { await new Promise(r => setTimeout(r, 100)); } }
   const base = `http://127.0.0.1:${port}`; const browser = await chromium.launch(); let failures = 0;
   const audit = async (page, name) => {
+    // Measure the settled page: wait for entrance animations (finite ones; the looping shimmer never ends).
+    await page.evaluate(() => Promise.all(document.getAnimations().filter(a => Number.isFinite(a.effect?.getComputedTiming().endTime)).map(a => a.finished.catch(() => {}))));
     await page.evaluate(axeSource);
     const res = await page.evaluate(() => axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-practice'] } }));
     const v = res.violations;
@@ -22,6 +24,11 @@ const freePort = () => new Promise(r => { const s = net.createServer(); s.listen
     for (const [label, vp] of [['phone', { width: 390, height: 844 }], ['desktop', { width: 1366, height: 800 }]]) {
       const ctx = await browser.newContext({ viewport: vp, locale: 'ar-SA' }); const page = await ctx.newPage();
       await page.goto(base + '/'); await page.waitForSelector('.product-card'); await page.waitForTimeout(500);
+      // Sections fade in as they scroll into view; scroll through so axe sees every one of them, then wait for the motion to settle.
+      await page.evaluate(async () => { for (let y = 0; y < document.documentElement.scrollHeight; y += 300) { scrollTo({ top: y, behavior: 'instant' }); await new Promise(r => setTimeout(r, 60)); } scrollTo({ top: 0, behavior: 'instant' }); });
+      await page.waitForTimeout(1500);
+      const hidden = await page.evaluate(() => document.querySelectorAll('.rv:not(.in)').length);
+      if (hidden) { failures++; console.log(`FAIL storefront (${label}) — ${hidden} section(s) never revealed`); }
       await audit(page, `storefront (${label})`);
       await page.locator('.quick-add').first().click({ force: true }); await page.waitForSelector('#productModal.open'); await page.waitForTimeout(300);
       await audit(page, `product modal (${label})`);

@@ -2,7 +2,7 @@
 <resources>
     <!-- Android 7-8.0. Android 8.1+ (values-v27) adds a light navigation bar and edge-to-edge cutout layout. -->
     <style name="Theme.Alfakhamah" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:windowBackground">@color/app_background</item>
+        <item name="android:windowBackground">@color/night</item>
         <item name="android:colorAccent">@color/brand</item>
         <item name="android:windowLightStatusBar">true</item>
     </style>

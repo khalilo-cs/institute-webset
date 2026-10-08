@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="app_background">#F5F1E9</color>
-    <color name="brand">#596654</color>
-    <color name="icon_background">#596654</color>
+    <!-- Same "night & champagne" palette as the website. -->
+    <color name="app_background">#FDFAF4</color>
+    <color name="night">#15130F</color>
+    <color name="gold">#C9A464</color>
+    <color name="gold_light">#EAD6A6</color>
+    <color name="gold_ink">#76561F</color>
+    <color name="ink">#1B1915</color>
+    <color name="muted">#5D574C</color>
+    <color name="brand">#C9A464</color>
+    <color name="icon_background">#15130F</color>
 </resources>

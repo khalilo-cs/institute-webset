@@ -10,12 +10,12 @@ PAGES = {
 }
 
 _CSS = """
-:root{--paper:#f8f6f0;--ink:#292720;--muted:#5f5d55;--line:#e2ddd1;--olive:#44503f}
+:root{--paper:#f8f4ec;--ink:#1b1915;--muted:#5d574c;--line:#e6dccb;--olive:#76561f}
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",Tahoma,Arial,sans-serif;line-height:1.9;font-size:17px}
-a{color:var(--olive)}a:focus-visible{outline:3px solid #b99b70;outline-offset:3px;border-radius:4px}
-header{border-bottom:1px solid var(--line);background:#fffefa}.wrap{width:min(780px,calc(100% - 32px));margin:0 auto}
+a{color:var(--olive)}a:focus-visible{outline:3px solid #76561f;outline-offset:3px;border-radius:4px}
+header{border-bottom:2px solid #c9a464;background:#15130f}header a{color:#ead6a6}header a:focus-visible{outline-color:#ead6a6}.wrap{width:min(780px,calc(100% - 32px));margin:0 auto}
 header .wrap{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:64px}
-header a.brand{font-weight:800;text-decoration:none;color:var(--ink);font-size:19px}
+header a.brand{font-weight:800;text-decoration:none;color:#fdfaf4;font-size:19px}
 main{padding:32px 0 56px}h1{font-size:30px;margin:0 0 8px;line-height:1.3}h2{font-size:21px;margin:30px 0 6px}
 p,li{margin:6px 0}ul{padding-inline-start:22px}.meta{color:var(--muted);font-size:15px}
 .skip{position:absolute;inset-inline-start:8px;top:-60px;background:#fff;padding:10px 14px;border-radius:8px;z-index:9}.skip:focus{top:8px}
@@ -91,7 +91,7 @@ def render(path: str, settings: dict) -> str | None:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f5f1e9">
+<meta name="theme-color" content="#15130f">
 <title>{esc(title)}</title>
 <meta name="description" content="{esc(PAGES[path])} — {esc(store)}">
 <link rel="icon" href="/icons/icon-192.png" sizes="192x192" type="image/png">

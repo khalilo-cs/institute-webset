@@ -12,8 +12,8 @@ fs.mkdirSync(OUT, { recursive: true });
 fs.mkdirSync(STORE, { recursive: true });
 
 const THEMES = {
-  customer: { bg: '#596654', fg: '#f8f4ec', accent: '#b99b70', prefix: '' },
-  admin: { bg: '#292d26', fg: '#e9d9b8', accent: '#b99969', prefix: 'admin-' },
+  customer: { bg: '#15130f', fg: '#ead6a6', accent: '#c9a464', prefix: '' },
+  admin: { bg: '#d3ad6b', fg: '#15130f', accent: '#15130f', prefix: 'admin-' },
 };
 
 // Same path data as the <svg> logo in index.html / admin.html (24x24 grid).

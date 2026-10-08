@@ -846,6 +846,8 @@ class StoreHandler(BaseHTTPRequestHandler):
         headers = {"Last-Modified": formatdate(stat.st_mtime, usegmt=True), "ETag": f'W/"{stat.st_size}-{stat.st_mtime_ns}"'}
         if path.startswith("/uploads/"):
             headers["Cache-Control"] = "public, max-age=31536000, immutable"   # uploads get a random name: never reused
+        elif path.startswith("/assets/fonts/"):
+            headers["Cache-Control"] = "public, max-age=31536000, immutable"   # font files are never edited in place
         elif path.startswith(("/assets/", "/icons/")):
             headers["Cache-Control"] = "public, max-age=86400"
         else:

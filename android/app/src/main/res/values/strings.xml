@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="ok">حسنًا</string>
+    <string name="splash_title">الفخامة</string>
+    <string name="splash_tagline">للأقمشة والستائر</string>
     <string name="cancel">إلغاء</string>
     <string name="retry">إعادة المحاولة</string>
 

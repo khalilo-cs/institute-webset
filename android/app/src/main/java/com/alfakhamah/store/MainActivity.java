@@ -21,6 +21,7 @@ import android.text.InputType;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.view.animation.DecelerateInterpolator;
 import android.webkit.CookieManager;
 import android.webkit.JsResult;
 import android.webkit.RenderProcessGoneDetail;
@@ -48,6 +49,8 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.core.view.WindowInsetsCompat;
 
 /**
@@ -75,6 +78,10 @@ public class MainActivity extends ComponentActivity {
     private Button retryButton;
     private Button changeServerButton;
     private TextView testBanner;
+    private View root;
+    private View splash;
+    private boolean splashDone;
+    private final Runnable splashTimeout = this::hideSplash;
 
     private String origin;
     private String startPath = BuildConfig.START_PATH;
@@ -97,7 +104,7 @@ public class MainActivity extends ComponentActivity {
         setContentView(R.layout.activity_main);
         restoredState = savedInstanceState;
 
-        View root = findViewById(R.id.root);
+        root = findViewById(R.id.root);
         ViewCompat.setOnApplyWindowInsetsListener(root, (v, insets) -> {
             Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars()
                     | WindowInsetsCompat.Type.displayCutout() | WindowInsetsCompat.Type.ime());
@@ -113,6 +120,15 @@ public class MainActivity extends ComponentActivity {
         retryButton = findViewById(R.id.retry_button);
         changeServerButton = findViewById(R.id.change_server_button);
         testBanner = findViewById(R.id.test_banner);
+        splash = findViewById(R.id.splash);
+        if (savedInstanceState == null) {
+            showSplash();
+        } else {
+            // Restored after the system reclaimed the app: go straight back to the page.
+            splashDone = true;
+            splash.setVisibility(View.GONE);
+            root.setBackgroundColor(getColor(R.color.app_background));
+        }
 
         retryButton.setOnClickListener(v -> retry());
         if (BuildConfig.ALLOW_SERVER_OVERRIDE) {
@@ -190,6 +206,7 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void promptForServer(String errorText) {
+        hideSplash();
         EditText input = new EditText(this);
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         input.setTextDirection(View.TEXT_DIRECTION_LTR);
@@ -326,6 +343,40 @@ public class MainActivity extends ComponentActivity {
         }
     }
 
+    // ---------------------------------------------------------------------------------------- launch screen
+
+    /** Night launch screen with the gold mark; light status-bar icons while it is visible. */
+    private void showSplash() {
+        systemBarsLight(false);
+        View content = findViewById(R.id.splash_content);
+        content.setAlpha(0f);
+        content.setScaleX(0.92f);
+        content.setScaleY(0.92f);
+        content.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(700)
+                .setInterpolator(new DecelerateInterpolator(2f)).start();
+        View line = findViewById(R.id.splash_line);
+        line.setScaleX(0f);
+        line.animate().scaleX(1f).setStartDelay(250).setDuration(900)
+                .setInterpolator(new DecelerateInterpolator(2f)).start();
+        // Never keep the user waiting behind it: the store, an error or the address prompt takes over.
+        mainHandler.postDelayed(splashTimeout, 10_000);
+    }
+
+    private void hideSplash() {
+        if (splashDone) return;
+        splashDone = true;
+        mainHandler.removeCallbacks(splashTimeout);
+        root.setBackgroundColor(getColor(R.color.app_background));
+        systemBarsLight(true);
+        splash.animate().alpha(0f).setDuration(450).withEndAction(() -> splash.setVisibility(View.GONE)).start();
+    }
+
+    private void systemBarsLight(boolean light) {
+        WindowInsetsControllerCompat bars = WindowCompat.getInsetsController(getWindow(), root);
+        bars.setAppearanceLightStatusBars(light);
+        bars.setAppearanceLightNavigationBars(light);
+    }
+
     // ---------------------------------------------------------------------------------------- error screen
 
     private void showError(String title, String message, boolean canRetry) {
@@ -335,6 +386,7 @@ public class MainActivity extends ComponentActivity {
         errorView.setVisibility(View.VISIBLE);
         webView.setVisibility(View.INVISIBLE);
         progress.setVisibility(View.GONE);
+        hideSplash();
     }
 
     private void hideError() {
@@ -362,6 +414,7 @@ public class MainActivity extends ComponentActivity {
             if (!pageFailed) {
                 errorView.setVisibility(View.GONE);
                 webView.setVisibility(View.VISIBLE);
+                hideSplash();
             }
         }
 

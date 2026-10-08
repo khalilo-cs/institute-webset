@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">الفخامة</string>
+    <string name="shortcut_admin_short">لوحة الإدارة</string>
+    <string name="shortcut_admin_long">فتح لوحة الإدارة</string>
+</resources>

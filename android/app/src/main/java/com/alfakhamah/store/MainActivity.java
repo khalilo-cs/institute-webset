@@ -50,9 +50,11 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 
 /**
- * One WebView shell shared by both apps (product flavors):
- * - customer: opens the storefront at "/"
- * - admin: opens the management panel at "/admin/" (the panel's own login screen; nothing is stored here)
+ * The single app for customers and the shop admin: a WebView shell around the shared server.
+ * - Opens the storefront at "/".
+ * - The admin panel (/admin/) loads in the same shell, reached from the storefront footer or the
+ *   "لوحة الإدارة" launcher shortcut; it asks for the admin login itself and nothing is stored here.
+ * - While the admin panel is on screen the window is secured (no screenshots, hidden in recents).
  *
  * The server origin comes from the build (BuildConfig.SERVER_ORIGIN). Only test (debug) builds may
  * be pointed at another address at runtime.
@@ -61,7 +63,8 @@ public class MainActivity extends ComponentActivity {
 
     private static final String PREFS = "server";
     private static final String PREF_ORIGIN = "origin";
-    private static final boolean IS_ADMIN = "admin".equals(BuildConfig.APP_KIND);
+    private static final String EXTRA_START_PATH = "start_path";
+    private static final String ADMIN_START_PATH = "/admin/";
 
     private WebView webView;
     private ProgressBar progress;
@@ -73,6 +76,7 @@ public class MainActivity extends ComponentActivity {
     private TextView testBanner;
 
     private String origin;
+    private String startPath = BuildConfig.START_PATH;
     private NavigationPolicy policy;
     private boolean pageFailed;
     private Bundle restoredState;
@@ -87,10 +91,8 @@ public class MainActivity extends ComponentActivity {
                 SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT),
                 SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT));
         super.onCreate(savedInstanceState);
-        if (IS_ADMIN) {
-            // The admin panel shows orders and customer phone numbers: keep it out of screenshots and the recents view.
-            getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
-        }
+        // Only the admin shortcut may pick another start page, and only this one.
+        if (ADMIN_START_PATH.equals(getIntent().getStringExtra(EXTRA_START_PATH))) startPath = ADMIN_START_PATH;
         setContentView(R.layout.activity_main);
         restoredState = savedInstanceState;
 
@@ -173,7 +175,7 @@ public class MainActivity extends ComponentActivity {
             }
             return;
         }
-        policy = new NavigationPolicy(origin, IS_ADMIN);
+        policy = new NavigationPolicy(origin);
         if (BuildConfig.ALLOW_SERVER_OVERRIDE) {
             testBanner.setVisibility(View.VISIBLE);
             testBanner.setText(getString(R.string.test_banner, origin));
@@ -183,7 +185,7 @@ public class MainActivity extends ComponentActivity {
             return;
         }
         restoredState = null;
-        webView.loadUrl(origin + BuildConfig.START_PATH);
+        webView.loadUrl(origin + startPath);
     }
 
     private void promptForServer(String errorText) {
@@ -239,7 +241,7 @@ public class MainActivity extends ComponentActivity {
         s.setMediaPlaybackRequiresUserGesture(true);
         s.setSafeBrowsingEnabled(true);
         // The pages skip their service worker when they see this marker: the shell handles offline natively.
-        s.setUserAgentString(s.getUserAgentString() + " AlfakhamahApp/" + BuildConfig.VERSION_NAME + " (" + BuildConfig.APP_KIND + ")");
+        s.setUserAgentString(s.getUserAgentString() + " AlfakhamahApp/" + BuildConfig.VERSION_NAME);
 
         CookieManager cookies = CookieManager.getInstance();
         cookies.setAcceptCookie(true);
@@ -255,9 +257,19 @@ public class MainActivity extends ComponentActivity {
         if (origin == null) {
             applyServer(resolveOrigin());
         } else if (webView.getUrl() == null) {
-            webView.loadUrl(origin + BuildConfig.START_PATH);
+            webView.loadUrl(origin + startPath);
         } else {
             webView.reload();
+        }
+    }
+
+    /** Admin pages show orders and customer phone numbers: keep them out of screenshots and the recents view. */
+    private void updateSecureFlag(String url) {
+        boolean admin = policy != null && url != null && policy.isAdminArea(url);
+        if (admin) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
         }
     }
 
@@ -332,6 +344,7 @@ public class MainActivity extends ComponentActivity {
 
         @Override
         public void onPageStarted(WebView view, String url, Bitmap favicon) {
+            updateSecureFlag(url);
             pageFailed = false;
             progress.setVisibility(View.VISIBLE);
         }
@@ -407,7 +420,7 @@ public class MainActivity extends ComponentActivity {
                 private void handleOnce(String url) {
                     if (handled) return;
                     handled = true;
-                    routeUrl(url);
+                    if (!routeUrl(url)) webView.loadUrl(url); // e.g. the admin's "view the store" link
                     mainHandler.post(popup::destroy);
                 }
 

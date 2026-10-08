@@ -143,6 +143,7 @@ class PublicAndStaticTests(ServerCase):
         status, resp, body = self.req("GET", "/")
         self.assertIn("text/html", resp.getheader("Content-Type"))
         self.assertIn(b'rel="manifest"', body)
+        self.assertIn(b'href="/admin/"', body, "storefront footer links to the admin login (same app, same database)")
         self.assertEqual(self.req("HEAD", "/")[0], 200)
 
     def test_path_traversal_is_blocked(self):

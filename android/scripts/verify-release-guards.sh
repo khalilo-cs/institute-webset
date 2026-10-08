@@ -11,7 +11,7 @@ SIGN=(-PANDROID_KEYSTORE_FILE="$tmp_keystore" -PANDROID_KEYSTORE_PASSWORD=guardt
 
 expect_refused() {
   local label="$1" expected="$2"; shift 2
-  out="$(./gradlew --no-daemon -q :app:assembleCustomerRelease "$@" 2>&1)"; code=$?
+  out="$(./gradlew --no-daemon -q :app:assembleRelease "$@" 2>&1)"; code=$?
   if [ $code -ne 0 ] && grep -qF "$expected" <<<"$out"; then
     echo "PASS  refused: $label"
   else

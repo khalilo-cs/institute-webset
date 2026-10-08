@@ -28,29 +28,17 @@ android {
     defaultConfig {
         minSdk = 29 // Android 10+: DownloadManager can save to Downloads without a storage permission
         targetSdk = 36
+        applicationId = "com.alfakhamah.store"
         versionCode = 1
         versionName = "1.0.0"
         buildConfigField("String", "SERVER_ORIGIN", "\"$serverOrigin\"")
+        // One app for customers and the admin: it opens the storefront; the admin panel is reached from the
+        // storefront footer or the "لوحة الإدارة" launcher shortcut and still requires the admin login.
+        buildConfigField("String", "START_PATH", "\"/\"")
     }
 
     buildFeatures {
         buildConfig = true
-    }
-
-    flavorDimensions += "app"
-    productFlavors {
-        create("customer") {
-            dimension = "app"
-            applicationId = "com.alfakhamah.store"
-            buildConfigField("String", "APP_KIND", "\"customer\"")
-            buildConfigField("String", "START_PATH", "\"/\"")
-        }
-        create("admin") {
-            dimension = "app"
-            applicationId = "com.alfakhamah.store.admin"
-            buildConfigField("String", "APP_KIND", "\"admin\"")
-            buildConfigField("String", "START_PATH", "\"/admin/\"")
-        }
     }
 
     signingConfigs {
@@ -138,12 +126,12 @@ val verifyReleaseInputs by tasks.registering {
         if (problems.isNotEmpty()) {
             throw GradleException(
                 "Refusing to build a release APK:\n  - " + problems.joinToString("\n  - ") +
-                    "\nSee ANDROID.md. For a test build use the debug variants (assembleCustomerDebug / assembleAdminDebug)."
+                    "\nSee ANDROID.md. For a test build use the debug variant (assembleDebug)."
             )
         }
     }
 }
 
-tasks.matching { it.name.matches(Regex("pre(Customer|Admin)ReleaseBuild")) }.configureEach {
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
     dependsOn(verifyReleaseInputs)
 }

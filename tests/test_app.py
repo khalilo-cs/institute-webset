@@ -229,7 +229,7 @@ class PublicAndStaticTests(ServerCase):
 class AdminTests(ServerCase):
     def test_admin_endpoints_require_login(self):
         for path in ("/api/admin/me", "/api/admin/dashboard", "/api/admin/products", "/api/admin/categories",
-                     "/api/admin/orders", "/api/admin/settings", "/api/admin/export/orders.csv"):
+                     "/api/admin/orders", "/api/admin/settings", "/api/admin/export/orders.csv", "/api/admin/messages"):
             self.assertEqual(self.req("GET", path)[0], 401, path)
         self.assertEqual(self.json("POST", "/api/admin/products", {"name": "x"})[0], 401)
 
@@ -791,9 +791,10 @@ class GalleryAndCategoryTests(ServerCase):
 
 class StandardsTests(ServerCase):
     def test_csp_uses_nonces_and_no_unsafe_inline_scripts(self):
-        for path in ("/", "/admin/", "/privacy", "/offline.html", "/product/wavy-03"):
+        for path in ("/", "/admin/", "/privacy", "/offline.html", "/product/wavy-03", "/products", "/categories",
+                     "/category/curtains", "/about", "/contact", "/faq", "/no-such-page"):
             status, resp, body = self.req("GET", path)
-            self.assertEqual(status, 200, path)
+            self.assertEqual(status, 404 if path == "/no-such-page" else 200, path)
             csp = resp.getheader("Content-Security-Policy")
             nonce = re.search(r"script-src 'self' 'nonce-([^']+)'", csp).group(1)
             self.assertNotIn("'unsafe-inline'", csp.split("style-src-attr")[0], path)
@@ -874,8 +875,12 @@ class StandardsTests(ServerCase):
             status, resp, body = self.req("GET", "/sitemap.xml", headers={"Host": "shop.example.org"})
             self.assertEqual(status, 200)
             text = body.decode()
-            self.assertEqual(text.count("<url>"), 1 + 2 + 18)
+            # home + 5 store pages + 2 legal pages + 1 category with products + 18 products
+            self.assertEqual(text.count("<url>"), 1 + 5 + 2 + 1 + 18)
             self.assertIn("<loc>http://shop.example.org/product/wavy-01</loc>", text)
+            for page in ("/products", "/categories", "/about", "/contact", "/faq", "/category/curtains"):
+                self.assertIn(f"<loc>http://shop.example.org{page}</loc>", text)
+            self.assertNotIn("/category/fabrics", text, "a category without products is not listed")
             self.assertIn("<image:loc>http://shop.example.org/assets/wavy-01.jpg</image:loc>", text)
             self.assertIn("/privacy", text)
             _, _, page = self.req("GET", "/", headers={"Host": "shop.example.org"})
@@ -1014,6 +1019,637 @@ class BackupTests(unittest.TestCase):
             shutil.rmtree(data_dir, ignore_errors=True)
 
 
+def main_of(html: str) -> str:
+    """The page's own content (between the shell's main markers)."""
+    return html.split("<!--main:start-->", 1)[1].split("<!--main:end-->", 1)[0]
+
+
+def ld_blocks(html: str) -> list[dict]:
+    return [json.loads(b) for b in re.findall(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html, re.S)]
+
+
+def handler_attributes(html: str) -> list[str]:
+    """Real on*= attributes in the markup (escaped text that merely contains 'onerror=' does not count)."""
+    from html.parser import HTMLParser
+    found: list[str] = []
+
+    class Collector(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            found.extend(f"{tag}[{name}]" for name, _ in attrs if name.lower().startswith("on"))
+    Collector().feed(html)
+    return found
+
+
+def ld_type(block: dict) -> str:
+    kind = block.get("@type")
+    return kind if isinstance(kind, str) else "+".join(kind)
+
+
+class StorePagesTests(ServerCase):
+    """About, products, categories, one category, one product, contact, FAQ, branded 404 — all inside the shared shell."""
+    PAGES = {"/products": "products", "/categories": "categories", "/category/curtains": "category", "/product/wavy-03": "product",
+             "/about": "about", "/contact": "contact", "/faq": "faq"}
+
+    def page(self, path: str, **kw) -> tuple[int, http.client.HTTPResponse, str]:
+        status, resp, body = self.req("GET", path, **kw)
+        return status, resp, body.decode()
+
+    def test_every_page_renders_inside_the_shared_shell(self):
+        for path, name in self.PAGES.items():
+            status, resp, html = self.page(path)
+            self.assertEqual(status, 200, path)
+            self.assertIn("text/html", resp.getheader("Content-Type"))
+            self.assertEqual(len(re.findall(r"<h1\b", html)), 1, f"one <h1> on {path}")
+            self.assertIn(f'<body data-page="{name}"', html)
+            main = main_of(html)
+            crumbs = re.search(r'<nav class="breadcrumbs" aria-label="مسار التنقل"><ol>(.*?)</ol></nav>', main, re.S)
+            self.assertTrue(crumbs, path)
+            items = re.findall(r"<li>(.*?)</li>", crumbs.group(1))
+            self.assertGreaterEqual(len(items), 2, path)
+            self.assertIn('href="/"', items[0])
+            self.assertIn('aria-current="page"', items[-1], "the current page is the last crumb")
+            self.assertNotIn("<a ", items[-1], "the current crumb is not a link")
+            self.assertEqual(crumbs.group(1).count("aria-current"), 1)
+            self.assertTrue(main.lstrip().startswith('<section class="page-hero'), path)
+            # the shell is intact: header, search, cart, favourites, dialogs and scripts work on every page
+            for hook in ('id="searchInput"', 'id="cartOpen"', 'id="cartCount"', 'id="favoritesToggle"', 'id="productModal"',
+                         'id="orderModal"', 'id="orderForm"', 'id="adminBar"', 'id="cartDrawer"', '<style nonce=', 'id="pageStyles"'):
+                self.assertIn(hook, html, (path, hook))
+            ids = re.findall(r'\sid="([^"]+)"', html)
+            self.assertEqual(len(ids), len(set(ids)), f"duplicate ids on {path}: {[i for i in ids if ids.count(i) > 1]}")
+            self.assertNotIn("javascript:", html.lower())
+            self.assertIn("<!--main:start-->", html)
+            self.assertEqual(self.req("HEAD", path)[0], 200, path)
+
+    def test_structured_data_and_meta_per_page(self):
+        expected = {"/products": {"BreadcrumbList", "CollectionPage"}, "/categories": {"BreadcrumbList", "CollectionPage"},
+                    "/category/curtains": {"BreadcrumbList", "CollectionPage"}, "/product/wavy-03": {"Product", "BreadcrumbList"},
+                    "/about": {"BreadcrumbList", "AboutPage"}, "/contact": {"BreadcrumbList", "ContactPage"}, "/faq": {"BreadcrumbList", "FAQPage"}}
+        for path, types in expected.items():
+            _, _, html = self.page(path, headers={"Host": "shop.example.org"})
+            blocks = ld_blocks(html)
+            self.assertEqual({ld_type(b) for b in blocks}, types, path)
+            self.assertIn('content="noindex,nofollow"', html, "noindex until the owner marks the store ready")
+            self.assertIn(f'property="og:url" content="http://shop.example.org{path}"', html)
+            self.assertRegex(html, r"<title>[^<]+ \| الفخامة للأقمشة والستائر</title>")
+        _, _, html = self.page("/product/wavy-03", headers={"Host": "shop.example.org"})
+        crumbs = next(b for b in ld_blocks(html) if b["@type"] == "BreadcrumbList")["itemListElement"]
+        self.assertEqual([c["name"] for c in crumbs], ["الرئيسية", "ستائر تفصيل", "ستائر ويفي تفصيل حسب الطلب — موديل 3"])
+        self.assertEqual([c["item"] for c in crumbs], ["http://shop.example.org/", "http://shop.example.org/category/curtains",
+                                                       "http://shop.example.org/product/wavy-03"])
+        _, _, html = self.page("/products")
+        listing = next(b for b in ld_blocks(html) if b["@type"] == "CollectionPage")["mainEntity"]
+        self.assertEqual((listing["@type"], listing["numberOfItems"]), ("ItemList", 18))
+        _, _, html = self.page("/faq")
+        faq = next(b for b in ld_blocks(html) if b["@type"] == "FAQPage")
+        sys.path.insert(0, str(ROOT))
+        import pages
+        self.assertEqual([(q["name"], q["acceptedAnswer"]["text"]) for q in faq["mainEntity"]], pages.FAQ)
+        # once ready: indexable, canonical, and a search result page stays out of the index
+        cookie, csrf = self.login()
+        self.json("PUT", "/api/admin/settings", {"site_ready": True}, cookie=cookie, csrf=csrf)
+        try:
+            _, _, html = self.page("/about", headers={"Host": "shop.example.org"})
+            self.assertIn('rel="canonical" href="http://shop.example.org/about"', html)
+            self.assertIn('content="index,follow,max-image-preview:large"', html)
+            _, _, html = self.page("/products?q=" + quote_url("موديل"))
+            self.assertIn('content="noindex,nofollow"', html)
+            status, _, html = self.page("/no-such-page")
+            self.assertEqual(status, 404)
+            self.assertIn('content="noindex,nofollow"', html)
+            self.assertIn('<link id="canonicalLink" rel="canonical">', html)
+        finally:
+            self.json("PUT", "/api/admin/settings", {"site_ready": False}, cookie=cookie, csrf=csrf)
+
+    def test_products_page_server_renders_the_catalogue(self):
+        _, _, html = self.page("/products")
+        main = main_of(html)
+        self.assertIn('id="shop"', main)
+        self.assertIn('<div class="filter-list" id="filterList" role="group" aria-label="تصفية حسب القسم">', main)
+        self.assertIn('data-filter="all"', main)
+        self.assertIn('data-filter="curtains"', main)
+        self.assertIn('<span class="result-count" id="resultCount" aria-live="polite">18 منتجات</span>', main)
+        self.assertIn('<select class="sort-select" id="sortSelect">', main)
+        for value in ("featured", "low", "high", "name"):
+            self.assertIn(f'<option value="{value}">', main)
+        grid = re.search(r'<div class="product-grid" id="productGrid"[^>]*>(.*)</div>\s*<p class="product-footnote"', main, re.S).group(1)
+        self.assertEqual(grid.count('<article class="product-card">'), 18)
+        self.assertIn('<a class="product-link" href="/product/wavy-01">ستائر ويفي تفصيل حسب الطلب — موديل 1</a>', grid)
+        self.assertEqual(len(re.findall(r'data-quick="\d+"', grid)), 18)
+        self.assertEqual(len(re.findall(r'data-favorite="\d+"', grid)), 18)
+        self.assertIn('<span class="on-request">السعر حسب الطلب</span>', grid)
+        # ?q= filters the server-rendered grid (same haystack as the script) and fills the header search box
+        _, _, html = self.page("/products?q=" + quote_url("موديل 1"))
+        main = main_of(html)
+        self.assertEqual(main.count('<article class="product-card">'), 10, "موديل 1 and 10..18")
+        self.assertIn('id="searchInput"', html)
+        self.assertRegex(html, r'<input id="searchInput"[^>]*value="موديل 1"')
+        _, _, html = self.page("/products?q=" + quote_url('"><script>alert(1)</script>'))
+        self.assertNotIn("<script>alert(1)", html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", main_of(html))
+        self.assertIn('class="no-results"', main_of(html))
+
+    def test_categories_and_category_pages_follow_the_catalogue(self):
+        _, _, html = self.page("/categories")
+        index = re.search(r'<div class="category-grid" id="categoryIndex">(.*?)</div></section>', main_of(html), re.S).group(1)
+        self.assertEqual(index.count('class="category-card"'), 1, "only categories that hold products")
+        self.assertIn('href="/category/curtains"', index)
+        self.assertIn("<h3>ستائر تفصيل</h3><p>18 منتج</p>", index)
+        self.assertEqual(self.page("/category/fabrics")[0], 200, "an active category without products still answers")
+        self.assertIn('content="noindex,nofollow"', self.page("/category/fabrics")[2])
+        self.assertIn("لا توجد منتجات في هذا القسم حاليًا", main_of(self.page("/category/fabrics")[2]))
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        status, made, _ = self.json("POST", "/api/admin/products", {"name": "قماش كتان", "category": "fabrics", "price": 95, "stock": 3,
+                                                                    "image": "/assets/wavy-06.jpg"}, **kw)
+        self.assertEqual(status, 201, made)
+        try:
+            index = main_of(self.page("/categories")[2])
+            self.assertEqual(index.count('class="category-card"'), 2)
+            status, _, html = self.page("/category/fabrics")
+            self.assertEqual(status, 200)
+            self.assertIn('<body data-page="category" data-category="fabrics">', html)
+            main = main_of(html)
+            self.assertIn('<h1 id="pageTitle">أقمشة الستائر</h1>', main)
+            self.assertNotIn('id="filterList"', main, "a category page filters to body[data-category]")
+            self.assertIn('id="productGrid"', main)
+            self.assertIn('id="sortSelect"', main)
+            self.assertEqual(main.count('<article class="product-card">'), 1)
+            self.assertIn("٩٥ <small>ر.س</small>", main)
+            switch = re.search(r'<nav class="category-switch" aria-label="الأقسام">(.*?)</nav>', main, re.S).group(1)
+            self.assertIn('href="/category/curtains"', switch)
+            self.assertRegex(switch, r'href="/category/fabrics" aria-current="page"')
+            self.assertEqual(switch.count("aria-current"), 1)
+            self.assertIn('class="page-hero-media" src="/assets/wavy-06.jpg"', main, "backdrop falls back to the first product photo")
+            # a hidden category is gone: branded 404
+            self.assertEqual(self.json("PUT", "/api/admin/categories/fabrics", {"name": "أقمشة الستائر", "active": False}, **kw)[0], 200)
+            status, _, html = self.page("/category/fabrics")
+            self.assertEqual(status, 404)
+            self.assertIn('data-page="notfound"', html)
+            self.assertEqual(main_of(self.page("/categories")[2]).count('class="category-card"'), 1)
+        finally:
+            self.json("PUT", "/api/admin/categories/fabrics", {"name": "أقمشة الستائر", "active": True}, **kw)
+            self.json("DELETE", f"/api/admin/products/{made['product']['id']}", **kw)
+        self.assertEqual(self.page("/category/does-not-exist")[0], 404)
+
+    def test_product_page_markup_and_states(self):
+        status, _, html = self.page("/product/wavy-03", headers={"Host": "shop.example.org"})
+        self.assertEqual(status, 200)
+        pid = re.search(r'data-product-id="(\d+)" data-product-slug="wavy-03"', html).group(1)
+        main = main_of(html)
+        self.assertIn(f'<article class="product-page" aria-labelledby="productTitle" data-product-id="{pid}">', main)
+        self.assertIn('<img id="pageGalleryMain" src="/assets/wavy-03.jpg"', main)
+        self.assertNotIn('class="gthumb', main.split('id="relatedGrid"')[0], "one photo: no thumbnails")
+        self.assertIn('<h1 id="productTitle">ستائر ويفي تفصيل حسب الطلب — موديل 3</h1>', main)
+        self.assertIn('<a class="eyebrow product-page-category" href="/category/curtains">ستائر تفصيل</a>', main)
+        self.assertIn('<span class="on-request">السعر حسب الطلب</span>', main)
+        self.assertRegex(main, rf'<button class="btn btn-primary" type="button" data-add-product="{pid}">أضف إلى السلة')
+        self.assertIn('data-copy-link="http://shop.example.org/product/wavy-03"', main)
+        self.assertIn('href="https://wa.me/?text=', main, "share link (not the store's number)")
+        self.assertIn("تفصيل الستائر حسب المقاس؛ تواصل مع المتجر لتأكيد التوصيل والتركيب بحسب موقعك.", main, "delivery note from the settings")
+        related = re.search(r'<div class="product-grid" id="relatedGrid">(.*?)</div></div></section>', main, re.S).group(1)
+        self.assertEqual(related.count('<article class="product-card">'), 4)
+        self.assertNotIn(f'data-quick="{pid}"', related, "the product itself is not related to itself")
+        # a priced, out-of-stock product with a gallery
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        status, made, _ = self.json("POST", "/api/admin/products", {"name": "ستارة معرض", "category": "curtains", "price": 1450, "stock": 0,
+                                                                    "images": ["/assets/wavy-04.jpg", "/assets/wavy-05.jpg"], "sku": "G-1"}, **kw)
+        self.assertEqual(status, 201, made)
+        product = made["product"]
+        try:
+            main = main_of(self.page("/product/" + quote_url(product["slug"]))[2])
+            thumbs = re.findall(r'<button type="button" class="gthumb( active)?" data-page-gindex="(\d)" data-full="([^"]+)" aria-label="[^"]+" aria-pressed="(true|false)">', main)
+            self.assertEqual([(t[1], t[2], t[3]) for t in thumbs], [("0", "/assets/wavy-04.jpg", "true"), ("1", "/assets/wavy-05.jpg", "false")])
+            self.assertIn('src="/assets/wavy-04-t.jpg"', main, "thumbnails use the small photo")
+            self.assertIn("١٬٤٥٠ <small>ريال سعودي</small>", main)
+            self.assertRegex(main, rf'data-add-product="{product["id"]}" disabled>غير متوفر حاليًا</button>')
+            self.assertIn('class="product-page-stock is-out"', main)
+            self.assertIn('<span dir="ltr">G-1</span>', main)
+            # hidden -> branded 404
+            self.json("PUT", f"/api/admin/products/{product['id']}", {"name": "ستارة معرض", "category": "curtains", "price": 1450, "stock": 0,
+                                                                     "images": ["/assets/wavy-04.jpg"], "active": False}, **kw)
+            status, _, html = self.page("/product/" + quote_url(product["slug"]))
+            self.assertEqual(status, 404)
+            self.assertIn("هذا المنتج غير متاح حاليًا", html)
+        finally:
+            self.json("DELETE", f"/api/admin/products/{product['id']}", **kw)
+
+    def test_about_contact_and_faq_content(self):
+        sys.path.insert(0, str(ROOT))
+        import pages
+        main = main_of(self.page("/about")[2])
+        self.assertIn('<h1 id="pageTitle">من نحن</h1>', main)
+        prose = re.search(r'<div class="prose">(.*?)</div>', main, re.S).group(1)
+        self.assertEqual(prose.count("<p>"), 3, "the default text has three paragraphs")
+        self.assertEqual(main.count('<article class="service-card">'), 5)
+        for title in ("تفصيل ستائر حسب المقاس", "ستائر رول", "ستائر شرائح معدنية", "ستائر كهربائية", "أقمشة الستائر"):
+            self.assertIn(f"<h3>{title}</h3>", main)
+        self.assertIn('href="/category/curtains">تصفّح ستائر تفصيل', main, "a service links to its category only when it has products")
+        self.assertNotIn('href="/category/roller"', main)
+        self.assertIn('href="tel:+966576486491"', main)
+        self.assertIn('href="https://maps.app.goo.gl/kn2kxuPujQT9raLG7?g_st=awb"', main)
+        self.assertIn('href="/products"', main)
+        self.assertIn('href="/contact"', main)
+        for path in ("/about", "/contact"):
+            text = main_of(self.page(path)[2])
+            self.assertNotIn("wa.me/", text, "no WhatsApp action while the owner has not set a number")
+            self.assertNotIn("أوقات العمل", text, "no opening hours until the owner sets them")
+        # contact form: labelled fields, autocomplete, honeypot, live status
+        main = main_of(self.page("/contact")[2])
+        form = re.search(r'<form id="contactForm"[^>]*>(.*?)</form>', main, re.S).group(1)
+        for field_id in re.findall(r'<(?:input|textarea)\b[^>]*\bid="([^"]+)"', form):
+            self.assertIn(f'<label for="{field_id}">', form, field_id)
+        self.assertRegex(form, r'<input id="contactName" name="name" required[^>]*autocomplete="name"')
+        self.assertRegex(form, r'<input id="contactPhone" name="phone" type="tel" inputmode="tel" required[^>]*autocomplete="tel"')
+        self.assertRegex(form, r'<input id="contactEmail" name="email" type="email"')
+        self.assertNotRegex(form, r'id="contactEmail"[^>]*required')
+        self.assertRegex(form, r'<textarea id="contactMessage" name="message" required')
+        self.assertRegex(form, r'<input type="checkbox" name="consent" value="1" required>')
+        self.assertIn('href="/privacy"', form)
+        self.assertRegex(form, r'<div class="hp" aria-hidden="true">.*<input id="contactWebsite" name="website" type="text" tabindex="-1" autocomplete="off">')
+        self.assertIn('<p id="contactStatus" class="form-status" role="status" aria-live="polite">', form)
+        self.assertRegex(main, r'<noscript>.*tel:\+966576486491.*</noscript>')
+        # opening hours and WhatsApp appear once the owner sets them
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        self.json("PUT", "/api/admin/settings", {"opening_hours": "السبت–الخميس\n<b>9ص</b>", "whatsapp": "+966 50 000 0000"}, **kw)
+        try:
+            main = main_of(self.page("/contact")[2])
+            self.assertIn("أوقات العمل", main)
+            self.assertIn("السبت–الخميس<br>&lt;b&gt;9ص&lt;/b&gt;", main)
+            self.assertIn('href="https://wa.me/966500000000"', main)
+        finally:
+            self.json("PUT", "/api/admin/settings", {"opening_hours": "", "whatsapp": ""}, **kw)
+        # FAQ: one source for /faq and the home page
+        main = main_of(self.page("/faq")[2])
+        self.assertEqual(re.findall(r"<summary>(.*?)</summary>", main), [q for q, _ in pages.FAQ])
+        self.assertIn('href="/contact"', main)
+        home = self.page("/")[2]
+        block = home.split("<!--faq:start-->")[1].split("<!--faq:end-->")[0]
+        self.assertEqual(re.findall(r"<summary>(.*?)</summary>", block), [q for q, _ in pages.FAQ])
+        self.assertIn('<body data-page="home">', home, "the home page keeps its own shell")
+
+    def test_hostile_text_is_escaped_on_every_page(self):
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        evil = '"><script>alert(1)</script><img src=x onerror=alert(2)>'
+        status, data, _ = self.json("PUT", "/api/admin/settings", {"about_title": evil, "about_body": evil + "\n\n" + evil, "opening_hours": evil,
+                                                                   "tagline": evil, "delivery_note": evil}, **kw)
+        self.assertEqual(status, 200, data)
+        status, cat, _ = self.json("POST", "/api/admin/categories", {"name": "قسم " + evil[:40], "description": evil}, **kw)
+        self.assertEqual(status, 201, cat)
+        status, made, _ = self.json("POST", "/api/admin/products", {"name": "ستارة " + evil, "category": cat["slug"], "price": 10, "stock": 2,
+                                                                    "description": evil, "badge": evil[:50], "alt": evil, "sku": evil[:60],
+                                                                    "image": "/assets/wavy-07.jpg"}, **kw)
+        self.assertEqual(status, 201, made)
+        try:
+            from urllib.parse import quote
+            paths = ["/about", "/contact", "/faq", "/products", "/categories", "/category/" + quote(cat["slug"]),
+                     "/product/" + quote(made["product"]["slug"]), "/product/wavy-02"]
+            for path in paths:
+                status, _, html = self.page(path)
+                self.assertEqual(status, 200, path)
+                self.assertNotIn("<script>alert", html, path)
+                self.assertNotIn("<img src=x", html, path)
+                self.assertEqual(handler_attributes(html), [], f"live event handler attribute on {path}")
+            self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", main_of(self.page("/about")[2]))
+        finally:
+            self.json("DELETE", f"/api/admin/products/{made['product']['id']}", **kw)
+            from urllib.parse import quote
+            self.json("DELETE", "/api/admin/categories/" + quote(cat["slug"]), **kw)
+            self.json("PUT", "/api/admin/settings", {"about_title": "من نحن", "about_body": DEFAULT_ABOUT, "opening_hours": "",
+                                                     "tagline": "تفصيل ستائر وأقمشة في جدة",
+                                                     "delivery_note": "تفصيل الستائر حسب المقاس؛ تواصل مع المتجر لتأكيد التوصيل والتركيب بحسب موقعك."}, **kw)
+
+    def test_not_found_and_redirects(self):
+        for path in ("/no-such-page", "/products/extra", "/category/", "/product/", "/.git/config", "/about/team"):
+            status, resp, html = self.page(path)
+            self.assertEqual(status, 404, path)
+            self.assertIn("text/html", resp.getheader("Content-Type"))
+            self.assertIn('<body data-page="notfound">', html)
+            self.assertIn('content="noindex,nofollow"', html)
+            self.assertEqual(len(re.findall(r"<h1\b", html)), 1)
+            main = main_of(html)
+            self.assertIn('<h1 id="pageTitle">الصفحة غير موجودة</h1>', main)
+            self.assertRegex(main, r'<form class="notfound-search" role="search" action="/products" method="get">')
+            self.assertIn('<label for="notFoundSearch">', main)
+            self.assertIn('<input id="notFoundSearch" name="q" type="search"', main)
+            for href in ("/", "/products", "/categories", "/contact"):
+                self.assertIn(f'<a href="{href}">', main)
+        self.assertEqual(self.req("HEAD", "/no-such-page")[0], 404)
+        status, resp, body = self.req("GET", "/missing.png")
+        self.assertEqual((status, resp.getheader("Content-Type")), (404, "text/plain; charset=utf-8"), "files keep a plain 404")
+        self.assertEqual(self.req("GET", "/assets/missing")[0], 404)
+        status, data, _ = self.json("GET", "/api/no-such-endpoint")
+        self.assertEqual(status, 404)
+        self.assertIn("error", data)
+        from urllib.parse import quote
+        arabic = quote("ستائر-رول")
+        for path, location in (("/about/", "/about"), ("/products/", "/products"), ("/products/?q=abc", "/products?q=abc"),
+                               ("/categories//", "/categories"), ("/contact/", "/contact"), ("/faq/", "/faq"), ("/privacy/", "/privacy"),
+                               ("/category/curtains/", "/category/curtains"), ("/product/wavy-03/", "/product/wavy-03"),
+                               (f"/category/{arabic}/", f"/category/{arabic}")):
+            status, resp, _ = self.req("GET", path)
+            self.assertEqual((status, resp.getheader("Location")), (301, location), path)
+        for path in ("//evil.example/", "/%2F%2Fevil.example/"):
+            status, resp, _ = self.req("GET", path)
+            self.assertNotEqual(status, 301, path)
+            self.assertIsNone(resp.getheader("Location"))
+        self.assertEqual(self.req("GET", "/admin/")[0], 200, "the admin keeps its trailing slash")
+        status, _, html = self.page("/index.html")
+        self.assertEqual(status, 200)
+        self.assertIn('<body data-page="home">', html)
+
+
+DEFAULT_ABOUT = ("الفخامة للأقمشة والستائر متجر في جدة للأقمشة والستائر وتفصيلها.\n\n"
+                 "نفصّل الستائر حسب مقاس نافذتك، ونوفّر ستائر رول وشرائح معدنية وستائر كهربائية، إلى جانب أقمشة الستائر.\n\n"
+                 "قبل بدء التفصيل نؤكد معك المقاسات ونوع القماش والسعر النهائي، لتكون الصورة واضحة قبل اعتماد الطلب.")
+
+
+def quote_url(text: str) -> str:
+    from urllib.parse import quote
+    return quote(text, safe="")
+
+
+class ContactTests(ServerCase):
+    ENV = {"CONTACT_LIMIT_PER_10MIN": "1000"}  # many messages here; the limiter has its own class below
+    VALID = {"name": "عميل التواصل", "phone": "0551234567", "message": "أريد الاستفسار عن ستائر رول لغرفة النوم", "consent": True}
+
+    def post(self, **fields):
+        return self.json("POST", "/api/contact", {**self.VALID, **fields})
+
+    def stored(self) -> list[dict]:
+        cookie, _ = self.login()
+        status, data, _ = self.json("GET", "/api/admin/messages", cookie=cookie)
+        self.assertEqual(status, 200, data)
+        return data["messages"]
+
+    def test_valid_message_is_stored_without_login_or_csrf(self):
+        status, data, resp = self.post(email="client@example.com", page="/contact", name="  عميل التواصل  ")
+        self.assertEqual((status, data), (201, {"ok": True}))
+        self.assertIn("application/json", resp.getheader("Content-Type"))
+        latest = self.stored()[0]
+        self.assertEqual((latest["name"], latest["phone"], latest["email"], latest["page"], latest["status"], latest["handled_at"]),
+                         ("عميل التواصل", "0551234567", "client@example.com", "/contact", "new", ""))
+        self.assertTrue(latest["created_at"] and latest["consent_at"])
+        # Arabic-Indic digits and a leading + are normalised; extra JSON fields are ignored
+        self.assertEqual(self.post(phone="+٩٦٦ ٥٥ ١٢٣ ٤٥٦٧", status="handled", id=1)[0], 201)
+        latest = self.stored()[0]
+        self.assertEqual((latest["phone"], latest["status"]), ("+966551234567", "new"))
+        # the visitor's text is stored verbatim and only returned as JSON (escaped by the admin UI)
+        self.assertEqual(self.post(message="<img src=x onerror=alert(1)> سؤال")[0], 201)
+        self.assertEqual(self.stored()[0]["message"], "<img src=x onerror=alert(1)> سؤال")
+
+    def test_validation_errors_store_nothing(self):
+        before = len(self.stored())
+        bad = [dict(name="x"), dict(name="ن" * 81), dict(name=None), dict(phone="12345"), dict(phone="1" * 17), dict(phone=""),
+               dict(phone=["0551234567"]), dict(email="not-an-email"), dict(email="a@b"), dict(email=("x" * 110) + "@example.com"),
+               dict(message="مرحبا"[:4]), dict(message="س" * 2001), dict(message=""), dict(consent=False), dict(consent="yes"),
+               dict(consent=None)]
+        for fields in bad:
+            status, data, _ = self.post(**fields)
+            self.assertEqual(status, 400, fields)
+            self.assertTrue(data.get("error"), fields)
+        status, data, _ = self.json("POST", "/api/contact", {k: v for k, v in self.VALID.items() if k != "consent"})
+        self.assertEqual(status, 400)
+        self.assertIn("الخصوصية", data["error"])
+        self.assertEqual(self.req("POST", "/api/contact", b"{not json")[0], 400)
+        self.assertEqual(self.req("POST", "/api/contact", b"[1,2]")[0], 400)
+        self.assertEqual(self.req("POST", "/api/contact", b"x" * (40 * 1024))[0], 413)
+        self.assertEqual(len(self.stored()), before)
+        # limits are inclusive
+        self.assertEqual(self.post(name="ن" * 80, phone="1" * 16, message="س" * 2000, email=("x" * 108) + "@example.com")[0], 201)
+        self.assertEqual(self.post(name="نو", phone="12345678", message="سؤال؟")[0], 201)
+
+    def test_page_hint_is_cleaned(self):
+        for sent, kept in (("/contact", "/contact"), ("javascript:alert(1)", ""), ("//evil.example", ""), ("https://x.y/", ""),
+                           ("/product/%D8%B3%D8%AA%D8%A7%D8%B1%D8%A9", "/product/ستارة"), ("/" + "a" * 300, "/" + "a" * 119), ("/a b", ""), (5, "")):
+            self.assertEqual(self.post(page=sent)[0], 201, sent)
+            self.assertEqual(self.stored()[0]["page"], kept, sent)
+
+    def test_honeypot_is_accepted_silently_and_dropped(self):
+        before = len(self.stored())
+        status, data, _ = self.json("POST", "/api/contact", {"name": "bot", "phone": "1", "message": "x", "website": "http://spam.example"})
+        self.assertEqual((status, data), (201, {"ok": True}))
+        status, data, _ = self.post(website="filled")
+        self.assertEqual((status, data), (201, {"ok": True}))
+        self.assertEqual(len(self.stored()), before)
+        self.assertEqual(self.post(website="")[0], 201, "an empty honeypot is a person")
+        self.assertEqual(len(self.stored()), before + 1)
+
+    def test_form_post_without_javascript(self):
+        from urllib.parse import urlencode
+        form = {"name": "زائر بلا سكربت", "phone": "0551112222", "email": "", "message": "<b>سؤال</b> عن الأقمشة", "consent": "1",
+                "website": "", "page": "/contact"}
+        hdrs = {"Content-Type": "application/x-www-form-urlencoded"}
+        status, resp, body = self.req("POST", "/api/contact", urlencode(form).encode(), headers=hdrs)
+        html = body.decode()
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", resp.getheader("Content-Type"))
+        self.assertIn('data-page="contact"', html)
+        self.assertRegex(html, r'<p id="contactStatus"[^>]*data-state="success">شكرًا لك')
+        self.assertEqual(self.stored()[0]["message"], "<b>سؤال</b> عن الأقمشة")
+        # an error keeps what the visitor typed (escaped) and explains the problem
+        status, _, body = self.req("POST", "/api/contact", urlencode({**form, "consent": ""}).encode(), headers=hdrs)
+        html = body.decode()
+        self.assertEqual(status, 400)
+        self.assertRegex(html, r'data-state="error">يلزم الموافقة على سياسة الخصوصية')
+        self.assertIn(">&lt;b&gt;سؤال&lt;/b&gt; عن الأقمشة</textarea>", html)
+        self.assertIn('value="زائر بلا سكربت"', html)
+        self.assertNotIn("<b>سؤال</b>", html)
+        self.assertIn('content="noindex,nofollow"', html)
+
+
+class ContactRateLimitTests(ServerCase):
+    def test_accepted_messages_are_limited_per_client(self):
+        body = {"name": "عميل", "phone": "0551234567", "message": "رسالة تجريبية", "consent": True}
+        codes = [self.json("POST", "/api/contact", body)[0] for _ in range(6)]
+        self.assertEqual(codes, [201] * 5 + [429])
+        status, data, resp = self.json("POST", "/api/contact", body)
+        self.assertEqual(status, 429)
+        self.assertEqual(resp.getheader("Retry-After"), "600")
+        self.assertTrue(data["error"])
+        self.assertEqual(self.json("POST", "/api/contact", {**body, "phone": "1"})[0], 400, "invalid input is still explained")
+        self.assertEqual(self.json("POST", "/api/contact", {**body, "website": "x"})[0], 201, "bots never learn about the limit")
+
+
+class AdminMessagesTests(ServerCase):
+    ENV = {"CONTACT_LIMIT_PER_10MIN": "1000"}
+
+    def send(self, name: str):
+        status, data, _ = self.json("POST", "/api/contact", {"name": name, "phone": "0551234567", "message": f"رسالة من {name}", "consent": True})
+        self.assertEqual(status, 201, data)
+
+    def test_login_and_csrf_are_required(self):
+        self.send("عميل أول")
+        self.assertEqual(self.req("GET", "/api/admin/messages")[0], 401)
+        self.assertEqual(self.json("PATCH", "/api/admin/messages/1", {"status": "handled"})[0], 401)
+        self.assertEqual(self.json("DELETE", "/api/admin/messages/1")[0], 401)
+        cookie, csrf = self.login()
+        self.assertEqual(self.json("PATCH", "/api/admin/messages/1", {"status": "handled"}, cookie=cookie)[0], 403)
+        self.assertEqual(self.json("PATCH", "/api/admin/messages/1", {"status": "handled"}, cookie=cookie, csrf="wrong")[0], 403)
+        self.assertEqual(self.json("DELETE", "/api/admin/messages/1", cookie=cookie)[0], 403)
+        self.assertEqual(self.json("DELETE", "/api/admin/messages/1", cookie=cookie, csrf="wrong")[0], 403)
+        _, resp, _ = self.req("GET", "/api/admin/messages", cookie=cookie)
+        self.assertEqual(resp.getheader("Cache-Control"), "no-store")
+        self.assertIn("noindex", resp.getheader("X-Robots-Tag"))
+
+    def test_list_filter_status_counts_delete_and_audit(self):
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        start = self.json("GET", "/api/admin/messages", cookie=cookie)[1]["counts"]
+        for name in ("سارة", "خالد", "منى"):
+            self.send(name)
+        status, data, _ = self.json("GET", "/api/admin/messages", cookie=cookie)
+        self.assertEqual(status, 200)
+        ids = [m["id"] for m in data["messages"]]
+        self.assertEqual(ids, sorted(ids, reverse=True), "newest first")
+        self.assertEqual(data["messages"][0]["name"], "منى")
+        self.assertEqual(set(data["messages"][0]), {"id", "name", "phone", "email", "message", "page", "status", "status_label",
+                                                     "created_at", "handled_at", "consent_at"})
+        self.assertEqual(data["counts"], {"new": start["new"] + 3, "handled": start["handled"], "total": start["total"] + 3})
+        target = data["messages"][1]["id"]
+        status, changed, _ = self.json("PATCH", f"/api/admin/messages/{target}", {"status": "handled"}, **kw)
+        self.assertEqual(status, 200, changed)
+        self.assertTrue(changed["ok"])
+        self.assertEqual((changed["message"]["id"], changed["message"]["status"]), (target, "handled"))
+        self.assertTrue(changed["message"]["handled_at"])
+        handled = self.json("GET", "/api/admin/messages?status=handled", cookie=cookie)[1]
+        self.assertEqual([m["id"] for m in handled["messages"]], [target] + [m["id"] for m in handled["messages"][1:]])
+        self.assertTrue(all(m["status"] == "handled" for m in handled["messages"]))
+        fresh = self.json("GET", "/api/admin/messages?status=new", cookie=cookie)[1]
+        self.assertNotIn(target, [m["id"] for m in fresh["messages"]])
+        self.assertTrue(all(m["status"] == "new" for m in fresh["messages"]))
+        self.assertEqual(fresh["counts"], {"new": start["new"] + 2, "handled": start["handled"] + 1, "total": start["total"] + 3})
+        self.assertEqual(len(self.json("GET", "/api/admin/messages?status=bogus", cookie=cookie)[1]["messages"]), start["total"] + 3)
+        _, dash, _ = self.json("GET", "/api/admin/dashboard", cookie=cookie)
+        self.assertEqual(dash["new_messages"], start["new"] + 2)
+        # back to new clears handled_at; bad status and unknown ids are refused
+        status, changed, _ = self.json("PATCH", f"/api/admin/messages/{target}", {"status": "new"}, **kw)
+        self.assertEqual((status, changed["message"]["status"], changed["message"]["handled_at"]), (200, "new", ""))
+        self.assertEqual(self.json("PATCH", f"/api/admin/messages/{target}", {"status": "archived"}, **kw)[0], 400)
+        self.assertEqual(self.json("PATCH", "/api/admin/messages/999999", {"status": "handled"}, **kw)[0], 404)
+        self.assertEqual(self.json("DELETE", f"/api/admin/messages/{target}", **kw)[0], 200)
+        self.assertEqual(self.json("DELETE", f"/api/admin/messages/{target}", **kw)[0], 404)
+        self.assertNotIn(target, [m["id"] for m in self.json("GET", "/api/admin/messages", cookie=cookie)[1]["messages"]])
+        actions = [e["action"] for e in self.json("GET", "/api/admin/audit", cookie=cookie)[1]["entries"]]
+        self.assertIn("message_status", actions)
+        self.assertIn("message_delete", actions)
+
+
+class SettingsAndCategoryContentTests(ServerCase):
+    def test_about_settings_round_trip_and_limits(self):
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        _, store, _ = self.json("GET", "/api/store")
+        self.assertEqual((store["about_title"], store["opening_hours"]), ("من نحن", ""))
+        settings = self.json("GET", "/api/admin/settings", cookie=cookie)[1]["settings"]
+        self.assertEqual(settings["about_body"], DEFAULT_ABOUT)
+        # the default text uses known facts only: no address, no years or counts
+        self.assertIn("جدة", settings["about_body"])
+        self.assertNotIn("مشرفة", settings["about_body"])
+        self.assertIsNone(re.search(r"[0-9٠-٩]", settings["about_body"]))
+        status, data, _ = self.json("PUT", "/api/admin/settings", {"about_title": "عن المتجر", "about_body": "فقرة أولى\n\nفقرة ثانية\nسطر",
+                                                                   "opening_hours": "يوميًا"}, **kw)
+        self.assertEqual(status, 200, data)
+        _, store, _ = self.json("GET", "/api/store")
+        self.assertEqual((store["about_title"], store["opening_hours"]), ("عن المتجر", "يوميًا"))
+        html = self.req("GET", "/about")[2].decode()
+        self.assertIn('<h1 id="pageTitle">عن المتجر</h1>', html)
+        self.assertIn("<title>عن المتجر | ", html)
+        self.assertIn("<p>فقرة أولى</p><p>فقرة ثانية<br>سطر</p>", main_of(html))
+        self.assertIn("أوقات العمل", main_of(html))
+        self.json("PUT", "/api/admin/settings", {"about_title": "ع" * 200, "about_body": "ب" * 4000, "opening_hours": "و" * 400}, **kw)
+        settings = self.json("GET", "/api/admin/settings", cookie=cookie)[1]["settings"]
+        self.assertEqual((len(settings["about_title"]), len(settings["about_body"]), len(settings["opening_hours"])), (120, 3000, 300))
+        # an empty title falls back to the default heading
+        self.json("PUT", "/api/admin/settings", {"about_title": "", "about_body": DEFAULT_ABOUT, "opening_hours": ""}, **kw)
+        self.assertEqual(self.json("GET", "/api/store")[1]["about_title"], "من نحن")
+        self.assertIn('<h1 id="pageTitle">من نحن</h1>', self.req("GET", "/about")[2].decode())
+        self.assertEqual(self.json("GET", "/api/store")[1]["phone"], "+966 57 648 6491", "contact details untouched")
+
+    def test_category_description_round_trip(self):
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        status, data, _ = self.json("POST", "/api/admin/categories", {"name": "ستائر المجالس", "description": "  " + "و" * 450}, **kw)
+        self.assertEqual(status, 201, data)
+        slug = data["slug"]
+        self.assertEqual(data["description"], "و" * 400)
+        from urllib.parse import quote
+        url = "/api/admin/categories/" + quote(slug)
+        try:
+            pub = {c["slug"]: c for c in self.json("GET", "/api/categories")[1]["categories"]}
+            self.assertEqual(pub[slug]["description"], "و" * 400)
+            self.assertTrue(all("description" in c for c in pub.values()))
+            status, data, _ = self.json("PUT", url, {"name": "ستائر المجالس", "description": "ستائر تُفصَّل للمجالس.\nسطر ثانٍ"}, **kw)
+            self.assertEqual((status, data["description"]), (200, "ستائر تُفصَّل للمجالس.\nسطر ثانٍ"))
+            admin = {c["slug"]: c for c in self.json("GET", "/api/admin/categories", cookie=cookie)[1]["categories"]}
+            self.assertEqual(admin[slug]["description"], "ستائر تُفصَّل للمجالس.\nسطر ثانٍ")
+            status, data, _ = self.json("PUT", url, {"name": "ستائر المجالس", "active": True}, **kw)
+            self.assertEqual(data["description"], "ستائر تُفصَّل للمجالس.\nسطر ثانٍ", "a client that does not send it keeps it")
+            html = self.req("GET", "/category/" + quote(slug))[2].decode()
+            self.assertIn('<p class="page-hero-intro">ستائر تُفصَّل للمجالس.<br>سطر ثانٍ</p>', html)
+            self.assertIn('content="ستائر تُفصَّل للمجالس. سطر ثانٍ"', html, "meta description from the category text")
+            status, data, _ = self.json("PUT", url, {"name": "ستائر المجالس", "description": ""}, **kw)
+            self.assertEqual(data["description"], "")
+        finally:
+            self.json("DELETE", url, **kw)
+
+
+class ShellUnitTests(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(ROOT))
+
+    def test_fill_shell_swaps_main_body_styles_and_marks_the_nav(self):
+        import pages
+        template = ('<html><head><title>t</title></head><body data-page="home" class="x"><nav class="main-nav" id="mainNav">'
+                    '<a href="/">ر</a><a href="/products">م</a><a href="/about">ع</a></nav><input id="searchInput" type="search">'
+                    '<main id="main"><!--main:start-->HOME<!--main:end--></main></body></html>')
+        out = pages.fill_shell(template, "<p>X</p>", "category", {"category": 'a"b'}, nav_path="/products", search='q"<')
+        self.assertIn('<body data-page="category" data-category="a&quot;b">', out)
+        self.assertIn("<!--main:start-->\n<p>X</p>\n<!--main:end-->", out)
+        self.assertNotIn("HOME", out)
+        self.assertIn('<a aria-current="page" href="/products">', out)
+        self.assertEqual(out.split("<body")[1].count("aria-current"), 1)
+        self.assertIn('<style id="pageStyles">', out.split("</head>")[0])
+        self.assertIn('<input id="searchInput" value="q&quot;&lt;" type="search">', out)
+        with self.assertRaises(RuntimeError):
+            pages.fill_shell("<html><body></body></html>", "x", "faq")
+
+    def test_home_faq_and_card_helpers(self):
+        import pages
+        template = (ROOT / "index.html").read_text(encoding="utf-8")
+        out = pages.fill_home_faq(template)
+        self.assertEqual(out.split("<!--faq:start-->")[1].split("<!--faq:end-->")[0].count("<details>"), len(pages.FAQ))
+        self.assertEqual(pages.arabic_number(1450), "١٬٤٥٠")
+        self.assertEqual(pages.price_html({"price": 0}), '<span class="on-request">السعر حسب الطلب</span>')
+        self.assertEqual(pages.web_url("javascript:alert(1)"), "")
+        self.assertEqual(pages.web_url("https://maps.example/x"), "https://maps.example/x")
+        self.assertEqual(pages.whatsapp_href(""), "")
+        self.assertEqual(pages.tel_href("+966 57 648 6491"), "tel:+966576486491")
+        card = pages.product_card({"id": 7, "name": "<b>n</b>", "slug": "س ل", "category_name": "ق", "price": 20, "stock": 0,
+                                   "thumb": "/assets/a.jpg", "alt": "", "badge": "x"})
+        self.assertIn('<a class="product-link" href="/product/%D8%B3%20%D9%84">&lt;b&gt;n&lt;/b&gt;</a>', card)
+        self.assertIn('<span class="product-badge">نفد المخزون</span>', card)
+        self.assertIn('<button class="quick-add" data-quick="7">عرض التفاصيل</button>', card)
+        self.assertIn("٢٠ <small>ر.س</small>", card)
+
+    def test_seo_helpers(self):
+        import seo
+        self.assertTrue(seo.clip("كلمة " * 80).endswith("…"))
+        self.assertLessEqual(len(seo.clip("كلمة " * 80)), 156)
+        xml = seo.sitemap_xml("https://s.example", [], ["/privacy"], seo.MAIN_PAGES, ["curtains", "ستائر"])
+        for loc in ("https://s.example/products", "https://s.example/faq", "https://s.example/category/curtains",
+                    "https://s.example/category/%D8%B3%D8%AA%D8%A7%D8%A6%D8%B1", "https://s.example/privacy"):
+            self.assertIn(f"<loc>{loc}</loc>", xml)
+        crumbs = seo.breadcrumb_schema("https://s.example", [("الرئيسية", "/"), ("الأقسام", "/categories")])
+        self.assertEqual([i["position"] for i in crumbs["itemListElement"]], [1, 2])
+        title, description = seo.page_meta("category", {"store_name": "S"}, name="ق", description="", count=3)
+        self.assertEqual(title, "ق | S")
+        self.assertIn("3 منتج", description)
+
+
 class SeoUnitTests(unittest.TestCase):
     def test_json_ld_cannot_break_out_of_the_script_tag(self):
         sys.path.insert(0, str(ROOT))
@@ -1053,6 +1689,31 @@ class LegacyDataMigrationTests(unittest.TestCase):
             images = [r[0] for r in conn.execute("SELECT image FROM products")]
             conn.close()
             self.assertTrue(images and all(i.startswith("/assets/") for i in images), images)
+        finally:
+            ServerCase.stop_server.__func__(ServerCase)
+
+    def test_database_without_messages_or_category_text_is_upgraded(self):
+        import sqlite3
+        data_dir = tempfile.mkdtemp(prefix="fakhama-test-")
+        try:
+            ServerCase.start_server.__func__(ServerCase, data_dir=data_dir, env={"ADMIN_PASSWORD": "Z" + secrets.token_urlsafe(16)})
+            ServerCase.stop_server.__func__(ServerCase, remove_data=False)
+            conn = sqlite3.connect(Path(data_dir) / "store.db")
+            conn.execute("DROP TABLE messages")
+            conn.execute("ALTER TABLE categories DROP COLUMN description")
+            conn.execute("DELETE FROM settings WHERE key IN ('about_title','about_body','opening_hours')")
+            conn.commit()
+            conn.close()
+            ServerCase.start_server.__func__(ServerCase, data_dir=data_dir, env={"ADMIN_PASSWORD": "Z" + secrets.token_urlsafe(16)})
+            conn = sqlite3.connect(Path(data_dir) / "store.db")
+            self.assertIn("description", [r[1] for r in conn.execute("PRAGMA table_info(categories)")])
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT value FROM settings WHERE key='about_title'").fetchone()[0], "من نحن")
+            conn.close()
+            conn = http.client.HTTPConnection("127.0.0.1", ServerCase.port, timeout=10)
+            conn.request("GET", "/about")
+            self.assertEqual(conn.getresponse().status, 200)
+            conn.close()
         finally:
             ServerCase.stop_server.__func__(ServerCase)
 

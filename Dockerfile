@@ -2,7 +2,7 @@
 FROM python:3.13-slim
 RUN useradd --create-home --uid 10001 app && mkdir /data && chown app /data
 WORKDIR /srv/app
-COPY app.py seo.py legal.py totp.py index.html admin.html offline.html sw.js manifest.webmanifest admin-manifest.webmanifest ./
+COPY app.py seo.py pages.py legal.py totp.py index.html admin.html offline.html sw.js manifest.webmanifest admin-manifest.webmanifest ./
 COPY assets ./assets
 COPY icons ./icons
 # Behind the bundled Caddy proxy (docker-compose.yml): trust X-Forwarded-*, write JSON logs, back up daily.

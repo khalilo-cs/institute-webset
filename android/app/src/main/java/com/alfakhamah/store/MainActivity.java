@@ -11,6 +11,7 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
 import android.net.http.SslError;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
@@ -239,7 +240,7 @@ public class MainActivity extends ComponentActivity {
         s.setSupportMultipleWindows(true); // window.open() is routed through NavigationPolicy (wa.me, maps, ...)
         s.setJavaScriptCanOpenWindowsAutomatically(false);
         s.setMediaPlaybackRequiresUserGesture(true);
-        s.setSafeBrowsingEnabled(true);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) s.setSafeBrowsingEnabled(true);
         // The pages skip their service worker when they see this marker: the shell handles offline natively.
         s.setUserAgentString(s.getUserAgentString() + " AlfakhamahApp/" + BuildConfig.VERSION_NAME);
 
@@ -309,7 +310,13 @@ public class MainActivity extends ComponentActivity {
         request.setTitle(name);
         if (mimeType != null && !mimeType.isEmpty()) request.setMimeType(mimeType);
         request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-        request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name);
+        } else {
+            // Android 7-9 would need a storage permission for the public Downloads folder; the app's own
+            // folder needs none, and the download notification still opens the file.
+            request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, name);
+        }
         DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
         try {
             manager.enqueue(request);

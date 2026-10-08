@@ -1,0 +1,4 @@
+# Caddy obtains and renews the HTTPS certificate for {$DOMAIN} automatically and forwards the visitor's real IP.
+{$DOMAIN} {
+	reverse_proxy app:4173
+}

@@ -118,7 +118,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       await ap.fill('#loginPass', password);
       await ap.click('#loginForm button[type=submit]');
       await ap.waitForSelector('.stats-grid');
-      assert.ok((await ap.textContent('.dashboard-grid')).includes('MH-'));
+      assert.ok((await ap.textContent('#pageContent')).includes('MH-'));
       await ap.screenshot({ path: path.join(SHOTS, '06-admin-dashboard-mobile.png') });
     })();
     await check('admin product thumbnails load (relative paths used to 404 under /admin/)', async () => {

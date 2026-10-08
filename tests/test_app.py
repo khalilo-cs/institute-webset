@@ -878,6 +878,41 @@ class StandardsTests(ServerCase):
         self.json("DELETE", f"/api/admin/products/{pid}", **kw)
 
 
+class AuditAndDashboardTests(ServerCase):
+    def test_admin_actions_are_audited_without_secrets(self):
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        self.assertEqual(self.json("GET", "/api/admin/audit")[0], 401)
+        self.json("POST", "/api/admin/login", {"username": "admin", "password": "wrong-password-xyz"})
+        status, made, _ = self.json("POST", "/api/admin/products", {"name": "منتج للتدقيق", "category": "curtains", "price": 5, "stock": 1, "image": "/assets/wavy-06.jpg"}, **kw)
+        self.json("DELETE", f"/api/admin/products/{made['product']['id']}", **kw)
+        self.json("PUT", "/api/admin/settings", {"tagline": "عبارة"}, **kw)
+        self.json("POST", "/api/admin/categories", {"name": "قسم تدقيق"}, **kw)
+        status, log, _ = self.json("GET", "/api/admin/audit", **kw)
+        self.assertEqual(status, 200)
+        actions = [e["action"] for e in log["entries"]]
+        for expected in ("login", "login_failed", "product_create", "product_delete", "settings_update", "category_change"):
+            self.assertIn(expected, actions)
+        text = json.dumps(log, ensure_ascii=False)
+        self.assertNotIn(self.admin_password, text)
+        self.assertNotIn("wrong-password-xyz", text)
+        self.assertNotIn(csrf, text)
+        self.assertTrue(all(e["ip"] for e in log["entries"]))
+
+    def test_dashboard_has_daily_series_and_low_stock_items(self):
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        status, made, _ = self.json("POST", "/api/admin/products", {"name": "منتج مخزون منخفض", "category": "curtains", "price": 10, "stock": 2, "image": "/assets/wavy-07.jpg"}, **kw)
+        status, order, _ = self.json("POST", "/api/orders", {"name": "عميل", "phone": "0551234567", "city": "جدة", "consent": True, "items": [{"product_id": made["product"]["id"], "quantity": 1}]})
+        self.assertEqual(status, 201)
+        _, dash, _ = self.json("GET", "/api/admin/dashboard", **kw)
+        self.assertEqual(len(dash["daily"]), 14)
+        self.assertEqual(dash["daily"][-1]["orders"], 1)
+        self.assertEqual(dash["daily"][-1]["total"], 10)
+        self.assertIn(made["product"]["id"], [i["id"] for i in dash["low_stock_items"]])
+        self.json("DELETE", f"/api/admin/products/{made['product']['id']}", **kw)
+
+
 class TwoFactorTests(ServerCase):
     def test_totp_matches_rfc_6238_vectors(self):
         sys.path.insert(0, str(ROOT))

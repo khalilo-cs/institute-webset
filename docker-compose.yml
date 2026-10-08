@@ -1,0 +1,27 @@
+# One command production setup with automatic HTTPS (Let's Encrypt) once your domain points at this server:
+#   DOMAIN=shop.your-domain.com ADMIN_PASSWORD='a-strong-password-12+' docker compose up -d --build
+# The first start creates the admin account from ADMIN_PASSWORD (or prints a generated one: docker compose logs app).
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      PUBLIC_BASE_URL: https://${DOMAIN:?set DOMAIN to your domain name}
+    volumes:
+      - store-data:/data        # database, uploads and daily backups (/data/backups)
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [app]
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+volumes:
+  store-data:
+  caddy-data:
+  caddy-config:

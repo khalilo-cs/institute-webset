@@ -176,6 +176,12 @@ def connect_db():
         conn.close()
 
 
+def audit(conn: sqlite3.Connection, actor: str, action: str, detail: str = "", ip: str = "") -> None:
+    """Accountability trail of admin activity (who/what/when/from where). Never records passwords, codes or tokens."""
+    conn.execute("INSERT INTO audit_log(at,actor,action,detail,ip) VALUES(?,?,?,?,?)", (now_iso(), actor[:100], action[:60], detail[:300], ip[:64]))
+    conn.execute("DELETE FROM audit_log WHERE id <= (SELECT MAX(id) FROM audit_log) - 5000")
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -233,6 +239,14 @@ def init_db() -> str | None:
             position INTEGER NOT NULL DEFAULT 0
           );
           CREATE INDEX IF NOT EXISTS idx_product_images ON product_images(product_id, position);
+          CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            at TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            action TEXT NOT NULL,
+            detail TEXT NOT NULL DEFAULT '',
+            ip TEXT NOT NULL DEFAULT ''
+          );
           CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL DEFAULT ''
@@ -479,6 +493,8 @@ class StoreHandler(BaseHTTPRequestHandler):
     request_id = "-"
     started = 0.0
     status_sent = 0
+    audited = False
+    audit_detail = ""
 
     def log_request(self, code="-", size="-") -> None:
         if not LOG_JSON:
@@ -550,6 +566,8 @@ class StoreHandler(BaseHTTPRequestHandler):
             if etag and not etag.startswith("W/"):
                 out["ETag"] = "W/" + etag
         out["Content-Length"] = str(len(body))
+        self.status_sent = status
+        self.audit_admin_change()  # written before the response leaves, so the client can read its own action right away
         self.send_response(status)
         for key, value in out.items():
             for item in (value if isinstance(value, list) else [value]):
@@ -617,6 +635,9 @@ class StoreHandler(BaseHTTPRequestHandler):
     def _run(self) -> None:
         self.request_id = uuid.uuid4().hex[:16]
         self.started = time.time()
+        self.status_sent = 0
+        self.audited = False
+        self.audit_detail = ""
         try:
             self.route()
         except APIError as exc:
@@ -816,6 +837,7 @@ class StoreHandler(BaseHTTPRequestHandler):
             admin = conn.execute("SELECT username,password_hash,totp_secret FROM admins WHERE username=?", (username,)).fetchone()
         if not admin or not verify_password(password, admin["password_hash"]):
             recent.append(now); LOGIN_FAILURES[ip] = recent
+            self.log_admin(username or "?", "login_failed", "wrong username or password")
             raise APIError("اسم المستخدم أو كلمة المرور غير صحيحة.", 401)
         if admin["totp_secret"]:
             # Second factor: password alone is not enough once the admin enabled an authenticator app.
@@ -823,14 +845,42 @@ class StoreHandler(BaseHTTPRequestHandler):
                 raise APIError("أدخل رمز التحقق من تطبيق المصادقة.", 401, extra={"need_code": True})
             if not totp.verify(admin["totp_secret"], code):
                 recent.append(now); LOGIN_FAILURES[ip] = recent
+                self.log_admin(username, "login_failed", "wrong 2FA code")
                 raise APIError("رمز التحقق غير صحيح أو منتهٍ.", 401, extra={"need_code": True})
         LOGIN_FAILURES.pop(ip, None)
         purge_expired(SESSIONS, 0, key_expires=True)
         token = secrets.token_urlsafe(36)
         csrf = secrets.token_urlsafe(24)
         SESSIONS[token] = {"username": admin["username"], "csrf": csrf, "expires": now + SESSION_TTL}
+        self.log_admin(admin["username"], "login", "2FA" if admin["totp_secret"] else "password")
         self.send_json({"ok": True, "username": admin["username"], "csrf": csrf}, 200,
                        {"Set-Cookie": [self.session_cookie(token, SESSION_TTL), self.flag_cookie(SESSION_TTL)]})
+
+    AUDIT_ACTIONS = ((re.compile(r"/api/admin/settings"), "settings_update"), (re.compile(r"/api/admin/password"), "password_change"),
+                     (re.compile(r"/api/admin/2fa/(setup|enable|disable)"), "two_factor"), (re.compile(r"/api/admin/categories"), "category_change"),
+                     (re.compile(r"/api/admin/orders/\d+"), "order_status"))
+
+    def audit_admin_change(self) -> None:
+        """Record successful admin writes that are not already audited inside their own handler."""
+        path = unquote(urlsplit(self.path).path)
+        if self.audited or self.command not in ("POST", "PUT", "PATCH", "DELETE") or not path.startswith("/api/admin/") or not (0 < self.status_sent < 400):
+            return
+        self.audited = True
+        for pattern, action in self.AUDIT_ACTIONS:
+            m = pattern.fullmatch(path) or (pattern.match(path) if "categories" in action else None)
+            if m:
+                _, session = self.get_session()
+                actor = session["username"] if session else "admin"
+                detail = self.audit_detail or f"{self.command} {path}"
+                self.log_admin(actor, action, detail)
+                return
+
+    def log_admin(self, actor: str, action: str, detail: str = "") -> None:
+        try:
+            with connect_db() as conn:
+                audit(conn, actor, action, detail, self.client_ip())
+        except Exception:
+            traceback.print_exc()  # auditing must never break the action itself
 
     def flag_cookie(self, max_age: int) -> str:
         """Readable marker (no secret) that lets the storefront show its admin bar without probing the API."""
@@ -841,7 +891,7 @@ class StoreHandler(BaseHTTPRequestHandler):
         secure = "; Secure" if self.is_secure() else ""
         return f"fakhama_admin={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}"
 
-    def save_product(self, product_id: int | None, data: dict) -> None:
+    def save_product(self, product_id: int | None, data: dict, session_user: str = "admin") -> None:
         name = str(data.get("name", "")).strip()[:140]
         category = str(data.get("category", "")).strip()[:100]
         description = str(data.get("description", "")).strip()[:4000]
@@ -914,6 +964,7 @@ class StoreHandler(BaseHTTPRequestHandler):
             drop_unreferenced_uploads(conn, previous)
             row = conn.execute("SELECT p.*,c.name AS category_name FROM products p JOIN categories c ON c.slug=p.category WHERE p.id=?", (result_id,)).fetchone()
             product = product_dict(row, row["category_name"], images_for(conn, [result_id])[result_id])
+            audit(conn, session_user, "product_update" if product_id else "product_create", f"#{result_id} {name} ({len(gallery)} images)", self.client_ip())
         self.send_json({"ok": True, "product": product}, 200 if product_id else 201)
 
     def route_mutation(self) -> None:
@@ -924,6 +975,7 @@ class StoreHandler(BaseHTTPRequestHandler):
             session = self.require_admin(write=True)
             if not session: return
             SESSIONS.pop(session["token"], None)
+            self.log_admin(session["username"], "logout")
             self.send_json({"ok": True}, 200, {"Set-Cookie": [self.session_cookie("", 0), self.flag_cookie(0)]}); return
         if path == "/api/admin/upload" and self.command == "POST":
             if not self.require_admin(write=True): return
@@ -932,20 +984,26 @@ class StoreHandler(BaseHTTPRequestHandler):
             thumb = save_image_data(data["thumb"]) if data.get("thumb") else ""
             self.send_json({"ok": True, "url": url, "thumb": thumb}, 201); return
         if path == "/api/admin/products" and self.command == "POST":
-            if not self.require_admin(write=True): return
-            self.save_product(None, self.read_json(MAX_UPLOAD_BODY)); return
+            current = self.require_admin(write=True)
+            if not current: return
+            current_admin = current["username"]
+            self.save_product(None, self.read_json(MAX_UPLOAD_BODY), current_admin); return
         match = re.fullmatch(r"/api/admin/products/(\d+)", path)
         if match and self.command == "PUT":
-            if not self.require_admin(write=True): return
-            self.save_product(int(match.group(1)), self.read_json(MAX_UPLOAD_BODY)); return
+            current = self.require_admin(write=True)
+            if not current: return
+            current_admin = current["username"]
+            self.save_product(int(match.group(1)), self.read_json(MAX_UPLOAD_BODY), current_admin); return
         if match and self.command == "DELETE":
-            if not self.require_admin(write=True): return
+            current = self.require_admin(write=True)
+            if not current: return
             product_id = int(match.group(1))
             with connect_db() as conn:
                 owned = [r[0] for r in conn.execute("SELECT path FROM product_images WHERE product_id=? UNION SELECT thumb FROM product_images WHERE product_id=?", (product_id, product_id))]
                 cur = conn.execute("DELETE FROM products WHERE id=?", (product_id,))
                 if not cur.rowcount: raise APIError("المنتج غير موجود.", 404)
                 drop_unreferenced_uploads(conn, owned)
+                audit(conn, current["username"], "product_delete", f"#{product_id}", self.client_ip())
             self.send_json({"ok": True}); return
         if path == "/api/admin/categories" and self.command == "POST":
             if not self.require_admin(write=True): return
@@ -1097,6 +1155,7 @@ class StoreHandler(BaseHTTPRequestHandler):
                         if stock:
                             conn.execute("UPDATE products SET stock=stock-?,updated_at=? WHERE id=?", (line["quantity"], now_iso(), line["product_id"]))
             conn.execute("UPDATE orders SET status=?,updated_at=? WHERE id=?", (new_status, now_iso(), order_id))
+            self.audit_detail = f"#{order_id}: {old_status} → {new_status}"
             updated = conn.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
             result = order_dict(conn, updated, True)
         self.send_json({"ok": True, "order": result})
@@ -1160,7 +1219,20 @@ class StoreHandler(BaseHTTPRequestHandler):
                         low_stock = conn.execute("SELECT COUNT(*) FROM products WHERE active=1 AND stock<=3").fetchone()[0]
                         recent_rows = conn.execute("SELECT * FROM orders ORDER BY id DESC LIMIT 6").fetchall()
                         recent = [order_dict(conn, r, False) for r in recent_rows]
-                    self.send_json({"products": total_products, "active_products": active_products, "pending_orders": pending, "total_orders": total_orders, "delivered_revenue": delivered_revenue, "low_stock": low_stock, "recent_orders": recent}); return
+                        since = (datetime.now(timezone.utc) - timedelta(days=13)).strftime("%Y-%m-%d")
+                        per_day = {r["d"]: (r["n"], r["t"]) for r in conn.execute(
+                            "SELECT substr(created_at,1,10) AS d, COUNT(*) AS n, COALESCE(SUM(total),0) AS t FROM orders WHERE status!='cancelled' AND substr(created_at,1,10)>=? GROUP BY d", (since,))}
+                        daily = []
+                        for offset in range(13, -1, -1):
+                            day = (datetime.now(timezone.utc) - timedelta(days=offset)).strftime("%Y-%m-%d")
+                            daily.append({"date": day, "orders": per_day.get(day, (0, 0))[0], "total": per_day.get(day, (0, 0))[1]})
+                        low_items = [dict(r) for r in conn.execute("SELECT id,name,stock FROM products WHERE active=1 AND stock<=3 ORDER BY stock,id LIMIT 8")]
+                    self.send_json({"products": total_products, "active_products": active_products, "pending_orders": pending, "total_orders": total_orders, "delivered_revenue": delivered_revenue, "low_stock": low_stock, "recent_orders": recent, "daily": daily, "low_stock_items": low_items}); return
+                if path == "/api/admin/audit":
+                    if not self.require_admin(): return
+                    with connect_db() as conn:
+                        rows = conn.execute("SELECT at,actor,action,detail,ip FROM audit_log ORDER BY id DESC LIMIT 100").fetchall()
+                    self.send_json({"entries": [dict(r) for r in rows]}); return
                 if path == "/api/admin/products":
                     if not self.require_admin(): return
                     with connect_db() as conn:

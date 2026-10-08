@@ -8,7 +8,7 @@ const axeSource = fs.readFileSync(require.resolve('axe-core/axe.min.js'), 'utf8'
 const freePort = () => new Promise(r => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
 (async () => {
   const port = await freePort(); const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'axe-')); const password = 'Ax' + Math.random().toString(36).slice(2) + 'Zz9!long';
-  const srv = spawn('python3', ['-I', path.resolve(__dirname, '..', 'app.py')], { cwd: dir, env: { ...process.env, PORT: String(port), DATA_DIR: dir, ADMIN_PASSWORD: password }, stdio: 'ignore' });
+  const srv = spawn('python3', ['-I', path.resolve(__dirname, '..', 'app.py')], { cwd: dir, env: { ...process.env, PORT: String(port), DATA_DIR: dir, ADMIN_PASSWORD: password, ENV_FILE: 'off' }, stdio: 'ignore' });
   for (let i = 0; i < 100; i++) { try { await fetch(`http://127.0.0.1:${port}/api/health`); break; } catch { await new Promise(r => setTimeout(r, 100)); } }
   const base = `http://127.0.0.1:${port}`; const browser = await chromium.launch(); let failures = 0;
   const audit = async (page, name) => {

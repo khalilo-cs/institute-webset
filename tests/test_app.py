@@ -21,6 +21,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+os.environ["ENV_FILE"] = "off"  # a developer's local .env must never leak into test servers
 
 # 1x1 PNG / smallest valid JPEG header + WebP container, enough for the server's magic-byte checks.
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
@@ -559,6 +560,45 @@ class FirstRunPasswordTests(ServerCase):
             self.assertIn("at least 12", proc.stderr)
         finally:
             shutil.rmtree(data_dir, ignore_errors=True)
+
+    def run_app(self, data_dir: str, **extra) -> subprocess.CompletedProcess:
+        env = {**os.environ, "PORT": str(free_port()), "DATA_DIR": data_dir, **extra}
+        return subprocess.run([sys.executable, "-I", str(ROOT / "app.py")], cwd=data_dir, capture_output=True, text=True, timeout=3, env=env)
+
+    def test_weak_password_needs_local_dev_switch(self):
+        data_dir = tempfile.mkdtemp(prefix="fakhama-test-")
+        try:
+            # Without the switch a 6-character password is refused (covered above); with it, a loopback server starts.
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.run_app(data_dir, ADMIN_PASSWORD="123456", ALLOW_WEAK_PASSWORD="1")
+            # The switch is refused as soon as the server is reachable from elsewhere or behind a proxy.
+            for extra in ({"HOST": "0.0.0.0"}, {"TRUST_PROXY": "1"}, {"PUBLIC_BASE_URL": "https://example.com"}):
+                proc = self.run_app(data_dir, ADMIN_PASSWORD="123456", ALLOW_WEAK_PASSWORD="1", **extra)
+                self.assertNotEqual(proc.returncode, 0, extra)
+                self.assertIn("ALLOW_WEAK_PASSWORD", proc.stderr, extra)
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
+
+    def test_local_env_file_is_read_and_real_environment_wins(self):
+        data_dir = tempfile.mkdtemp(prefix="fakhama-test-")
+        env_file = Path(data_dir) / "local.env"
+        env_file.write_text("# comment\nADMIN_USERNAME=محمد خليل\nADMIN_PASSWORD='123456'\nALLOW_WEAK_PASSWORD=1\n", encoding="utf-8")
+        try:
+            self.__class__.start_server(data_dir=data_dir, env={"ENV_FILE": str(env_file)})
+            self.admin_password = "123456"
+            conn = http.client.HTTPConnection("127.0.0.1", self.__class__.port, timeout=10)
+            body = json.dumps({"username": "محمد خليل", "password": "123456"}, ensure_ascii=False).encode()
+            conn.request("POST", "/api/admin/login", body, {"Content-Type": "application/json; charset=utf-8"})
+            res = conn.getresponse()
+            payload = res.read()
+            self.assertEqual(res.status, 200, payload)
+            self.assertEqual(json.loads(payload)["username"], "محمد خليل")
+            # A wrong password for the same user is still refused.
+            conn.request("POST", "/api/admin/login", json.dumps({"username": "محمد خليل", "password": "654321"}).encode(),
+                         {"Content-Type": "application/json"})
+            self.assertEqual(conn.getresponse().status, 401)
+        finally:
+            self.__class__.stop_server()
 
     def test_no_hardcoded_credentials_in_repo_sources(self):
         for name in ("app.py", "README.md", "index.html", "admin.html"):

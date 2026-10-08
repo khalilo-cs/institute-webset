@@ -26,7 +26,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fakhama-e2e-'));
   const password = 'E' + crypto.randomBytes(14).toString('base64url');
   const server = spawn('python3', ['-I', path.join(ROOT, 'app.py')], {
-    cwd: dataDir, env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir, ADMIN_PASSWORD: password }, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: dataDir, env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir, ADMIN_PASSWORD: password, ENV_FILE: 'off' }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let serverLog = '';
   server.stderr.on('data', d => { serverLog += d; });

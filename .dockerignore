@@ -9,3 +9,4 @@ __pycache__
 store.db*
 uploads
 backups
+.env

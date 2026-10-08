@@ -36,6 +36,29 @@ import seo  # noqa: E402
 import totp  # noqa: E402
 
 VERSION = "2.0.0"
+
+
+def load_local_env() -> None:
+    """Read KEY=VALUE lines from a git-ignored .env beside app.py; variables already in the environment win."""
+    name = os.environ.get("ENV_FILE", "")
+    if name.lower() == "off":
+        return
+    try:
+        lines = (Path(name).expanduser() if name else BASE_DIR / ".env").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        os.environ.setdefault(key.strip(), value)
+
+
+load_local_env()
 # DATA_DIR holds the mutable state (store.db + uploads/). Point it at a persistent volume in production.
 DATA_DIR = Path(os.environ.get("DATA_DIR") or BASE_DIR).expanduser().resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -54,6 +77,13 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 TRUST_PROXY = os.environ.get("TRUST_PROXY", "") == "1"
 # Optional canonical origin (https://example.com) used for robots.txt / sitemap.xml.
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+# Design phase on one machine only: ALLOW_WEAK_PASSWORD=1 lets the first admin password be as short as 6 characters.
+# It is refused outright unless the server listens on loopback with no proxy and no public address.
+LOCAL_ONLY = HOST in ("127.0.0.1", "localhost", "::1") and not TRUST_PROXY and not PUBLIC_BASE_URL
+ALLOW_WEAK_PASSWORD = os.environ.get("ALLOW_WEAK_PASSWORD", "") == "1"
+if ALLOW_WEAK_PASSWORD and not LOCAL_ONLY:
+    raise SystemExit("ALLOW_WEAK_PASSWORD=1 مسموح فقط عند التشغيل المحلي (HOST=127.0.0.1 بدون TRUST_PROXY وبدون PUBLIC_BASE_URL). احذفه قبل النشر.")
+MIN_PASSWORD = 6 if ALLOW_WEAK_PASSWORD else 12
 SESSION_TTL = 12 * 60 * 60
 MAX_BODY = 512 * 1024                      # default for JSON bodies (orders, settings, login ...)
 MAX_UPLOAD_BODY = 9 * 1024 * 1024         # one base64-encoded image (<= 5 MB) + its thumbnail
@@ -326,8 +356,8 @@ def init_db() -> str | None:
             password = ADMIN_PASSWORD
             if not password:
                 password = generated_password = secrets.token_urlsafe(15)
-            elif len(password) < 12:
-                raise RuntimeError("ADMIN_PASSWORD must be at least 12 characters")
+            elif len(password) < MIN_PASSWORD:
+                raise RuntimeError(f"ADMIN_PASSWORD must be at least {MIN_PASSWORD} characters")
             conn.execute("INSERT INTO admins(username,password_hash,updated_at) VALUES(?,?,?)",
                          (username, hash_password(password), now_iso()))
     return generated_password
@@ -1354,6 +1384,8 @@ if __name__ == "__main__":
         # Shown once, never stored in plain text. Copy it now and change it from Settings → Security.
         print(f"أُنشئ حساب المدير لأول مرة — المستخدم: {ADMIN_USERNAME.strip() or 'admin'}")
         print(f"كلمة المرور المولّدة (تظهر هذه المرة فقط): {first_run_password}")
+    if ALLOW_WEAK_PASSWORD:
+        print("وضع التصميم المحلي: كلمة مرور قصيرة مسموحة على هذا الجهاز فقط. لن يعمل هذا الوضع عند النشر.")
     print("تنبيه: غيّر كلمة مرور المدير وفعّل HTTPS قبل أي نشر عام.\n", flush=True)
     try:
         server.serve_forever()

@@ -20,7 +20,7 @@
   <link id="canonicalLink" rel="canonical" href="">
   <style>
     :root{
-      --paper:#f8f6f0;--cream:#f3efe7;--white:#fffefa;--ink:#292720;--muted:#77756d;
+      --paper:#f8f6f0;--cream:#f3efe7;--white:#fffefa;--ink:#292720;--muted:#5d5b53;
       --line:#e7e2d8;--olive:#596654;--olive-dark:#44503f;--clay:#b77a5b;--sand:#e9e1d4;
       --gold:#b99b70;--shadow:0 16px 46px rgba(48,42,32,.09);--radius:22px;--max:1200px;
       --font:system-ui,-apple-system,"Segoe UI",Tahoma,Arial,sans-serif;
@@ -259,6 +259,18 @@
       .cart-drawer{width:min(100%,410px)}.drawer-head{padding:18px 18px 14px}.cart-items{padding-inline:16px}.drawer-bottom{padding:15px 16px 18px}
       .modal-backdrop{padding:10px}.modal-box{border-radius:18px;max-height:94dvh}.product-modal-layout{grid-template-columns:1fr}.modal-image,.modal-image img{min-height:220px;height:240px}.modal-info{padding:20px}.modal-info h2{font-size:21px}.modal-info p{margin-bottom:8px}.modal-info .modal-price{font-size:17px;margin-bottom:10px}.order-modal{padding:24px 18px}.form-grid{grid-template-columns:1fr}.form-field.full{grid-column:auto}
     }
+    .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+    .skip-link{position:absolute;inset-inline-start:10px;top:-80px;z-index:100;background:#fffefa;color:var(--ink);padding:12px 18px;border-radius:10px;box-shadow:var(--shadow);font-weight:700}.skip-link:focus{top:10px}
+    :where(a,button,input,select,textarea,summary,[tabindex]):focus-visible{outline:3px solid var(--olive-dark);outline-offset:3px;border-radius:6px}
+    main:focus{outline:none}
+    .noscript-note{margin:0;padding:12px 18px;background:#fff3cd;color:#664d03;text-align:center}
+    .admin-bar{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;justify-content:center;background:#292d26;color:#f5f1e8;padding:8px 14px;font-size:13px}.admin-bar[hidden]{display:none}
+    .admin-bar a{color:#e9d9b8;font-weight:700;text-decoration:underline;text-underline-offset:3px;padding:6px 2px}
+    .gallery-view{display:flex;flex-direction:column;min-width:0;background:#e9e3d9}.gallery-view .modal-image{flex:1}
+    .gallery-thumbs{display:flex;gap:8px;padding:10px;overflow-x:auto;background:#f3efe7}
+    .gthumb{flex:0 0 auto;width:62px;height:62px;padding:0;border:2px solid transparent;border-radius:10px;overflow:hidden;background:#e9e3d9;cursor:pointer}.gthumb img{width:100%;height:100%;object-fit:cover}.gthumb.active{border-color:var(--olive-dark)}
+    .modal-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.modal-actions .btn{flex:1 1 auto;min-height:44px}
+    .consent{display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.7;margin:4px 0 16px;color:var(--muted)}.consent input{width:22px;height:22px;margin-top:2px;accent-color:var(--olive)}
     .on-request{font-size:13px;font-weight:700;color:var(--olive-dark)}
     @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*:before,*:after{transition:none!important;animation:none!important}}
   
@@ -338,6 +350,9 @@
   </script>
 </head>
 <body>
+  <a class="skip-link" href="#main">تخطي إلى المحتوى الرئيسي</a>
+  <noscript><p class="noscript-note">يلزم تفعيل JavaScript لعرض المنتجات وإرسال الطلبات. يمكنك التواصل مع المتجر هاتفيًا.</p></noscript>
+  <div class="admin-bar" id="adminBar" hidden role="region" aria-label="أدوات المدير"><span>أنت مسجّل دخول كمدير</span><a href="/admin/#products/new">+ إضافة منتج</a><a href="/admin/#categories">الأقسام</a><a href="/admin/#orders">الطلبات</a><a href="/admin/">لوحة الإدارة</a></div>
   <div class="demo-ribbon" id="demoRibbon" role="note">
     <span><i class="demo-dot" aria-hidden="true"></i>نسخة تجريبية — المنتجات والأسعار أمثلة؛ راجع معلومات المتجر قبل الإطلاق</span>
     <a href="#contact">جهّز متجرك للنشر</a>
@@ -370,7 +385,7 @@
     </div>
   </header>
 
-  <main>
+  <main id="main" tabindex="-1">
     <section class="hero" id="home" aria-labelledby="heroTitle">
       <div class="hero-content">
         <span class="eyebrow">تفصيل يكمّل أناقة منزلك</span>
@@ -481,7 +496,7 @@
         <div class="footer-col"><h3>معلومات</h3><div class="footer-links"><a href="#services">أنواع الستائر</a><a href="#faq">الأسئلة الشائعة</a><a href="#guide">دليل قياس الستائر</a><a href="#contact">تواصل معنا</a><a href="/admin/" rel="nofollow">دخول الإدارة</a></div></div>
         <div class="footer-col"><h3>بيانات المتجر</h3><div class="footer-contact"><div><b>المدينة:</b> <span data-store-city>أضف المدينة</span></div><div><b>الدولة:</b> المملكة العربية السعودية</div><div><b>العنوان:</b> <a id="storeAddress" href="https://maps.app.goo.gl/kn2kxuPujQT9raLG7?g_st=awb" target="_blank" rel="noopener">شارع المكرونة، مجمع الشرق</a></div><div><b>التواصل:</b> <span id="storeContact">أضف رقم الهاتف أو واتساب</span></div><div><a id="storeMapFooter" href="https://maps.app.goo.gl/kn2kxuPujQT9raLG7?g_st=awb" target="_blank" rel="noopener">افتح الموقع على خرائط Google ↗</a></div></div></div>
       </div>
-      <div class="footer-bottom"><p>© <span id="year"></span> <span data-store-name>الفخامة للأقمشة والستائر</span>. جميع الحقوق محفوظة.</p><div class="legal"><a href="#faq">سياسة الاستبدال والاسترجاع</a><a href="#faq">الخصوصية والشروط</a></div></div>
+      <div class="footer-bottom"><p>© <span id="year"></span> <span data-store-name>الفخامة للأقمشة والستائر</span>. جميع الحقوق محفوظة.</p><div class="legal"><a href="/terms">الشروط والأحكام</a><a href="/privacy">سياسة الخصوصية</a></div></div>
     </div>
   </footer>
 
@@ -493,7 +508,7 @@
   </aside>
 
   <div class="modal-backdrop" id="productModal" role="dialog" aria-modal="true" aria-label="تفاصيل المنتج"><div class="modal-box"><button class="modal-close" data-close-modal aria-label="إغلاق"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg></button><div id="productModalContent"></div></div></div>
-  <div class="modal-backdrop" id="orderModal" role="dialog" aria-modal="true" aria-labelledby="orderTitle"><div class="modal-box order-modal"><button class="modal-close" data-close-modal aria-label="إغلاق"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg></button><h2 id="orderTitle">بيانات الطلب</h2><p>أدخل بيانات التواصل لتسجيل الطلب في النظام وإظهاره في لوحة إدارة المتجر.</p><form id="orderForm"><div class="form-grid"><div class="form-field"><label for="customerName">الاسم</label><input id="customerName" name="name" required autocomplete="name" placeholder="اسمك الكامل"></div><div class="form-field"><label for="customerPhone">رقم الجوال</label><input id="customerPhone" name="phone" type="tel" required autocomplete="tel" placeholder="05xxxxxxxx"></div><div class="form-field full"><label for="customerCity">المدينة</label><input id="customerCity" name="city" required autocomplete="address-level2" placeholder="مثال: الرياض"></div><div class="form-field full"><label for="customerNote">ملاحظة (اختياري)</label><textarea id="customerNote" name="note" placeholder="موعد مناسب أو استفسار عن المنتج"></textarea></div></div><button class="btn btn-primary" type="submit">تأكيد الطلب وتسجيله</button><p class="form-disclaimer">يُحفظ الطلب في النظام ليتمكن المتجر من مراجعته والتواصل معك. لا يتم تحصيل مبلغ إلكتروني.</p></form></div></div>
+  <div class="modal-backdrop" id="orderModal" role="dialog" aria-modal="true" aria-labelledby="orderTitle"><div class="modal-box order-modal"><button class="modal-close" data-close-modal aria-label="إغلاق"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg></button><h2 id="orderTitle">بيانات الطلب</h2><p>أدخل بيانات التواصل لتسجيل الطلب في النظام وإظهاره في لوحة إدارة المتجر.</p><form id="orderForm"><div class="form-grid"><div class="form-field"><label for="customerName">الاسم</label><input id="customerName" name="name" required autocomplete="name" placeholder="اسمك الكامل"></div><div class="form-field"><label for="customerPhone">رقم الجوال</label><input id="customerPhone" name="phone" type="tel" inputmode="tel" required autocomplete="tel" placeholder="05xxxxxxxx"></div><div class="form-field full"><label for="customerCity">المدينة</label><input id="customerCity" name="city" required autocomplete="address-level2" placeholder="مثال: الرياض"></div><div class="form-field full"><label for="customerAddress">العنوان (اختياري)</label><input id="customerAddress" name="address" autocomplete="street-address" maxlength="250" placeholder="الحي والشارع"></div><div class="form-field full"><label for="customerNote">ملاحظة (اختياري)</label><textarea id="customerNote" name="note" placeholder="موعد مناسب أو استفسار عن المنتج"></textarea></div></div><label class="consent"><input type="checkbox" name="consent" required> <span>أوافق على <a href="/privacy" target="_blank" rel="noopener">سياسة الخصوصية</a> وعلى استخدام بياناتي لمعالجة طلبي.</span></label><button class="btn btn-primary" type="submit">تأكيد الطلب وتسجيله</button><p class="form-disclaimer">يُحفظ الطلب في النظام ليتمكن المتجر من مراجعته والتواصل معك. لا يتم تحصيل مبلغ إلكتروني.</p></form></div></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <script>
@@ -523,7 +538,7 @@ function saveState(){try{localStorage.setItem('fakhama-cart-v1',JSON.stringify(c
 const visibleCategories=()=>CATEGORIES.filter(c=>PRODUCTS.some(p=>p.category===c.slug));
 function renderCategoryCards(){
   const grid=$('#categoryGrid');if(!grid)return;
-  grid.innerHTML=visibleCategories().map(c=>{const items=PRODUCTS.filter(p=>p.category===c.slug),cover=items[0];return `<a class="category-card" href="#shop" data-category-link="${esc(c.slug)}"><img src="${esc(cover.image)}" alt="${esc(cover.alt||c.name)}" loading="lazy" decoding="async"><div class="category-card-content"><div><h3>${esc(c.name)}</h3><p>${items.length} منتج</p></div><span class="round-arrow">${icons.arrow}</span></div></a>`}).join('');
+  grid.innerHTML=visibleCategories().map(c=>{const items=PRODUCTS.filter(p=>p.category===c.slug),cover=items[0];return `<a class="category-card" href="#shop" data-category-link="${esc(c.slug)}"><img src="${esc(c.image||cover.thumb||cover.image)}" alt="${esc(cover.alt||c.name)}" loading="lazy" decoding="async"><div class="category-card-content"><div><h3>${esc(c.name)}</h3><p>${items.length} منتج</p></div><span class="round-arrow">${icons.arrow}</span></div></a>`}).join('');
 }
 function renderCategoryFilters(){
   const root=$('#filterList');if(!root)return;
@@ -538,7 +553,7 @@ function renderProducts(){
   if(catalogState==='loading'){$('#resultCount').textContent='';productGrid.innerHTML='<div class="no-results"><b>جارٍ تحميل المنتجات…</b><span>لحظات قليلة.</span></div>';return}
   if(catalogState==='error'){$('#resultCount').textContent='';productGrid.innerHTML='<div class="no-results"><b>تعذّر تحميل المنتجات</b><span>تحقق من اتصالك بالإنترنت ثم أعد المحاولة.</span><button class="btn btn-primary" type="button" data-retry-catalog style="margin-top:14px">إعادة المحاولة</button></div>';return}
   if(!list.length){productGrid.innerHTML=`<div class="no-results"><b>${showFavorites?'لا توجد منتجات في المفضلة بعد':'لم نعثر على نتيجة مطابقة'}</b><span>${showFavorites?'أضف قطعة إلى المفضلة بالضغط على علامة القلب.':'جرّب كلمة أخرى أو غيّر القسم المحدد.'}</span></div>`;return}
-  productGrid.innerHTML=list.map(p=>{const out=Number(p.stock||0)<=0;const fav=favorites.some(id=>String(id)===String(p.id));return `<article class="product-card"><div class="product-image-wrap"><img class="product-image" src="${esc(p.image)}" alt="${esc(p.alt||p.name)}" loading="lazy" decoding="async"><span class="product-badge">${out?'نفد المخزون':esc(p.badge||'متوفر')}</span><button class="favorite-btn ${fav?'active':''}" data-favorite="${esc(p.id)}" aria-label="${fav?'إزالة من':'إضافة إلى'} المفضلة: ${esc(p.name)}" aria-pressed="${fav}">${icons.heart}</button><button class="quick-add" data-quick="${esc(p.id)}">${out?'عرض التفاصيل':'عرض التفاصيل وإضافة للسلة'}</button></div><div class="product-info"><p class="product-category">${esc(p.categoryName||'ستائر وأقمشة')}</p><h3 class="product-name">${esc(p.name)}</h3><div class="product-bottom"><span class="product-price">${priceHtml(p)}</span><span class="rating"><span aria-hidden="true">✦</span> ${out?'غير متوفر':'متاح'}</span></div></div></article>`}).join('');
+  productGrid.innerHTML=list.map(p=>{const out=Number(p.stock||0)<=0;const fav=favorites.some(id=>String(id)===String(p.id));return `<article class="product-card"><div class="product-image-wrap"><img class="product-image" src="${esc(p.thumb||p.image)}" alt="${esc(p.alt||p.name)}" loading="lazy" decoding="async"><span class="product-badge">${out?'نفد المخزون':esc(p.badge||'متوفر')}</span><button class="favorite-btn ${fav?'active':''}" data-favorite="${esc(p.id)}" aria-label="${fav?'إزالة من':'إضافة إلى'} المفضلة: ${esc(p.name)}" aria-pressed="${fav}">${icons.heart}</button><button class="quick-add" data-quick="${esc(p.id)}">${out?'عرض التفاصيل':'عرض التفاصيل وإضافة للسلة'}</button></div><div class="product-info"><p class="product-category">${esc(p.categoryName||'ستائر وأقمشة')}</p><h3 class="product-name">${esc(p.name)}</h3><div class="product-bottom"><span class="product-price">${priceHtml(p)}</span><span class="rating"><span aria-hidden="true">✦</span> ${out?'غير متوفر':'متاح'}</span></div></div></article>`}).join('');
 }
 function updateCounts(){const n=cart.reduce((s,i)=>s+i.qty,0);$('#cartCount').textContent=n;$('#cartCount').classList.toggle('show',n>0);$('#favCount').textContent=favorites.length;$('#favCount').classList.toggle('show',favorites.length>0);$('#favoritesToggle').classList.toggle('fav-view-active',showFavorites)}
 function renderCart(){
@@ -551,25 +566,56 @@ function renderCart(){
 }
 function addToCart(id){const p=PRODUCTS.find(x=>String(x.id)===String(id));if(!p){toast('لم نعثر على المنتج؛ حدّث الصفحة');return}if(Number(p.stock||0)<=0){toast('هذا المنتج غير متوفر حاليًا');return}const item=cart.find(x=>String(x.id)===String(id));if(item){if(item.qty>=p.stock){toast(`الكمية المتاحة من هذا المنتج ${p.stock} فقط`);return}item.qty++}else cart.push({id:p.id,qty:1});saveState();renderCart();toast(`أُضيف ${p.name} إلى السلة`)}
 function toggleFavorite(id){const has=favorites.some(x=>String(x)===String(id));favorites=has?favorites.filter(x=>String(x)!==String(id)):[...favorites,id];saveState();updateCounts();renderProducts();toast(has?'أُزيل من المفضلة':'أُضيف إلى المفضلة')}
-function openDrawer(){renderCart();$('#cartDrawer').classList.add('open');$('#drawerOverlay').classList.add('open');document.body.classList.add('locked');$('#cartClose').focus()}
-function closeDrawer(){ $('#cartDrawer').classList.remove('open');$('#drawerOverlay').classList.remove('open');if(!$('.modal-backdrop.open'))document.body.classList.remove('locked') }
-function openModal(el){el.classList.add('open');document.body.classList.add('locked');const focusable=el.querySelector('button,input,textarea');if(focusable)setTimeout(()=>focusable.focus(),60)}
-function closeModal(el){el.classList.remove('open');if(!$('.modal-backdrop.open')&&!$('#cartDrawer').classList.contains('open'))document.body.classList.remove('locked')}
-function showProduct(id){const p=PRODUCTS.find(x=>String(x.id)===String(id));if(!p)return;const available=Number(p.stock||0)>0;$('#productModalContent').innerHTML=`<div class="product-modal-layout"><div class="modal-image"><img src="${esc(p.image)}" alt="${esc(p.alt||p.name)}"></div><div class="modal-info"><p class="product-category">${esc(p.categoryName||'ستائر وأقمشة')}</p><h2>${esc(p.name)}</h2><p>${esc(p.description||'')}</p><div class="modal-price">${onRequest(p)?'<span class="on-request">السعر حسب الطلب</span>':`${amount(p.price)} <span style="font-size:11px;font-weight:500;color:var(--muted)">ريال سعودي</span>`}</div><button class="btn btn-primary" data-modal-add="${esc(p.id)}" ${available?'':'disabled'}>${available?`أضف إلى السلة ${icons.arrow}`:'غير متوفر حاليًا'}</button><span class="modal-note">${available?(onRequest(p)?'يُفصَّل حسب الطلب؛ يؤكد المتجر المقاس والخامة والسعر قبل البدء.':`المتاح حاليًا: ${Number(p.stock)} قطعة.`):'سيظهر المنتج هنا عند توفر المخزون.'}</span></div></div>`;openModal($('#productModal'))}
-function startOrder(){if(catalogState!=='ready'){toast('تعذّر تحميل المنتجات الحالية؛ أعد المحاولة بعد عودة الاتصال');return}if(!cart.length){toast('أضف منتجًا إلى السلة أولًا');return}closeDrawer();$('#customerCity').value=STORE.city&&STORE.city!=='أضف المدينة'?STORE.city:'';openModal($('#orderModal'))}
+const isAdmin=()=>/(?:^|;\s*)fakhama_admin_flag=1/.test(document.cookie);
+const productUrl=p=>'/product/'+encodeURIComponent(p.slug||p.id);
+const baseTitle=document.title;
+let lastFocus=null,productPushed=false,suppressHistory=false;
+function focusables(root){return [...root.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),select,textarea,[tabindex]:not([tabindex="-1"])')].filter(el=>el.offsetParent!==null||el===document.activeElement)}
+function trapTab(e){
+  if(e.key!=='Tab')return;const open=$('.modal-backdrop.open')||($('#cartDrawer').classList.contains('open')?$('#cartDrawer'):null);if(!open)return;
+  const f=focusables(open);if(!f.length)return;const first=f[0],last=f[f.length-1];
+  if(e.shiftKey&&(document.activeElement===first||!open.contains(document.activeElement))){e.preventDefault();last.focus()}else if(!e.shiftKey&&(document.activeElement===last||!open.contains(document.activeElement))){e.preventDefault();first.focus()}
+}
+function restoreFocus(){if(lastFocus&&document.contains(lastFocus)){lastFocus.focus();lastFocus=null}}
+function openDrawer(){lastFocus=document.activeElement;renderCart();$('#cartDrawer').classList.add('open');$('#drawerOverlay').classList.add('open');document.body.classList.add('locked');$('#cartClose').focus()}
+function closeDrawer(){const was=$('#cartDrawer').classList.contains('open');$('#cartDrawer').classList.remove('open');$('#drawerOverlay').classList.remove('open');if(!$('.modal-backdrop.open'))document.body.classList.remove('locked');if(was)restoreFocus()}
+function openModal(el){if(!$('.modal-backdrop.open'))lastFocus=document.activeElement;el.classList.add('open');document.body.classList.add('locked');const focusable=el.querySelector('.modal-close,button,input,textarea');if(focusable)setTimeout(()=>focusable.focus(),60)}
+function closeModal(el){const was=el.classList.contains('open');el.classList.remove('open');if(!$('.modal-backdrop.open')&&!$('#cartDrawer').classList.contains('open'))document.body.classList.remove('locked');if(!was)return;if(el.id==='productModal')afterProductClose();if(!$('.modal-backdrop.open'))restoreFocus()}
+function afterProductClose(){
+  document.title=baseTitle;if(suppressHistory)return;
+  if(location.pathname.startsWith('/product/')){if(productPushed){productPushed=false;suppressHistory=true;history.back();setTimeout(()=>{suppressHistory=false},80)}else history.replaceState(null,'','/')}
+}
+function showProduct(id,opts={}){
+  const p=PRODUCTS.find(x=>String(x.id)===String(id));if(!p)return;const available=Number(p.stock||0)>0;
+  const imgs=p.images&&p.images.length?p.images:[{url:p.image,thumb:p.image}];
+  const url=location.origin+productUrl(p);const wa='https://wa.me/?text='+encodeURIComponent(`${p.name} — ${STORE.name}\n${url}`);
+  const thumbs=imgs.length>1?`<div class="gallery-thumbs" role="group" aria-label="صور المنتج">${imgs.map((im,i)=>`<button type="button" class="gthumb${i?'':' active'}" data-gindex="${i}" aria-label="الصورة ${i+1} من ${imgs.length}" aria-pressed="${i?'false':'true'}"><img src="${esc(im.thumb||im.url)}" alt="" loading="lazy" decoding="async"></button>`).join('')}</div>`:'';
+  $('#productModalContent').innerHTML=`<div class="product-modal-layout"><div class="gallery-view"><div class="modal-image"><img id="galleryMain" src="${esc(imgs[0].url)}" alt="${esc(p.alt||p.name)}" data-count="${imgs.length}"></div>${thumbs}</div><div class="modal-info"><p class="product-category">${esc(p.categoryName||'ستائر وأقمشة')}</p><h2 id="productModalTitle">${esc(p.name)}</h2><p>${esc(p.description||'')}</p><div class="modal-price">${onRequest(p)?'<span class="on-request">السعر حسب الطلب</span>':`${amount(p.price)} <span style="font-size:13px;font-weight:500;color:var(--muted)">ريال سعودي</span>`}</div><button class="btn btn-primary" data-modal-add="${esc(p.id)}" ${available?'':'disabled'}>${available?`أضف إلى السلة ${icons.arrow}`:'غير متوفر حاليًا'}</button><div class="modal-actions"><a class="btn btn-outline" href="${wa}" target="_blank" rel="noopener">مشاركة عبر واتساب</a><button class="btn btn-outline" type="button" data-copy-link="${esc(url)}">نسخ الرابط</button>${isAdmin()?`<a class="btn btn-outline" href="/admin/#products/edit/${esc(p.id)}">تعديل المنتج</a>`:''}</div><span class="modal-note">${available?(onRequest(p)?'يُفصَّل حسب الطلب؛ يؤكد المتجر المقاس والخامة والسعر قبل البدء.':`المتاح حاليًا: ${Number(p.stock)} قطعة.`):'سيظهر المنتج هنا عند توفر المخزون.'}</span></div></div>`;
+  $('#productModal').setAttribute('aria-labelledby','productModalTitle');$('#productModal').removeAttribute('aria-label');
+  document.title=`${p.name} | ${STORE.name||baseTitle}`;
+  if(opts.push!==false&&location.pathname!==productUrl(p)){history.pushState({pid:p.id},'',productUrl(p));productPushed=true}
+  openModal($('#productModal'));
+}
+function setGalleryImage(index){
+  const root=$('#productModalContent'),p=PRODUCTS.find(x=>x.slug&&location.pathname==='/product/'+encodeURIComponent(x.slug));const btns=[...root.querySelectorAll('[data-gindex]')];if(!btns.length)return;
+  const i=(index+btns.length)%btns.length;const img=btns[i].querySelector('img');const full=p&&p.images&&p.images[i]?p.images[i].url:img.src;
+  $('#galleryMain').src=full;btns.forEach((b,k)=>{b.classList.toggle('active',k===i);b.setAttribute('aria-pressed',String(k===i))});
+}
+async function copyLink(url){try{await navigator.clipboard.writeText(url);toast('تم نسخ رابط المنتج')}catch{toast(url)}}
+window.addEventListener('popstate',()=>{
+  if(suppressHistory)return;const m=location.pathname.match(/^\/product\/([^/]+)/);
+  if(m){const slug=decodeURIComponent(m[1]),p=PRODUCTS.find(x=>x.slug===slug);if(p)showProduct(p.id,{push:false})}
+  else if($('#productModal').classList.contains('open')){suppressHistory=true;closeModal($('#productModal'));suppressHistory=false}
+});
+let orderKey=null;const newKey=()=>(window.crypto&&crypto.randomUUID?crypto.randomUUID():`${Date.now()}${Math.random().toString(16).slice(2)}`).replace(/[^A-Za-z0-9_-]/g,'');
+function startOrder(){if(catalogState!=='ready'){toast('تعذّر تحميل المنتجات الحالية؛ أعد المحاولة بعد عودة الاتصال');return}if(!cart.length){toast('أضف منتجًا إلى السلة أولًا');return}closeDrawer();orderKey=orderKey||newKey();$('#customerCity').value=STORE.city&&STORE.city!=='أضف المدينة'?STORE.city:'';openModal($('#orderModal'))}
 function sendWhatsApp(text){const number=(STORE.whatsapp||'').replace(/\D/g,'');if(number){window.open(`https://wa.me/${number}?text=${encodeURIComponent(text)}`,'_blank','noopener,noreferrer');return true}const phone=(STORE.phone||'').replace(/[^\d+]/g,'');if(phone){window.location.href=`tel:${phone}`;return true}toast('بيانات التواصل غير متاحة حاليًا.');return false}
 function applyStoreSettings(s){
   STORE={...STORE,...s};
   $$('[data-store-name]').forEach(el=>el.textContent=STORE.name||'الفخامة للأقمشة والستائر');$$('[data-store-tagline]').forEach(el=>el.textContent=STORE.tagline||'تفصيل ستائر وأقمشة في جدة');$$('[data-store-city]').forEach(el=>el.textContent=STORE.city||'جدة');const contact=STORE.phone||STORE.whatsapp;$('#storeContact').textContent=contact||'أضف رقم الهاتف أو واتساب';$('#contactCtaText').textContent=STORE.whatsapp?'تواصل عبر واتساب':STORE.phone?'اتصل بالمتجر':'تواصل معنا';$('#storeAddress').textContent=STORE.address||'العنوان';$('#announcementText').textContent=`${STORE.name} — ${STORE.address||STORE.city}`;const map=STORE.map_url||'#contact';$('#mapButton').href=map;$('#storeAddress').href=map;$('#storeMapFooter').href=map;if(STORE.city)$('#contactCopy').textContent=`نخدم عملاءنا في ${STORE.city}. تواصل للاستفسار عن الأقمشة والستائر والتفصيل حسب المقاس.`;
   if(STORE.hero_title)$('#heroTitle').textContent=STORE.hero_title;if(STORE.hero_copy)$('#heroCopy').textContent=STORE.hero_copy;
-  const ready=Boolean(STORE.site_ready);$('#demoRibbon').hidden=ready;$('#robotsMeta').content=ready?'index,follow,max-image-preview:large':'noindex,nofollow';
-  document.title=STORE.seo_title||`${STORE.name} | تفصيل ستائر في جدة`;
-  $('#metaDescription').content=STORE.seo_description||'';$('#ogTitle').content=document.title;$('#ogDescription').content=STORE.seo_description||'';
-  const absoluteImage=new URL('/assets/wavy-11.jpg',location.origin).href;$('#ogImage').content=absoluteImage;
-  if(ready){$('#canonicalLink').href=location.origin+'/';$('#ogUrl').content=location.origin+'/'}else{$('#canonicalLink').removeAttribute('href');$('#ogUrl').content=''}
-  const schema={'@context':'https://schema.org','@type':'Store',name:STORE.name,description:STORE.seo_description||'',areaServed:{'@type':'Country',name:'المملكة العربية السعودية'},currenciesAccepted:'SAR'};
-  if(ready){schema.url=location.origin+'/';schema.image=absoluteImage;if(STORE.phone)schema.telephone=STORE.phone;if(STORE.map_url)schema.hasMap=STORE.map_url;if(STORE.city||STORE.address)schema.address={'@type':'PostalAddress',streetAddress:STORE.address||undefined,addressLocality:STORE.city||'جدة',addressCountry:'SA'}}
-  $('#localBusinessSchema').textContent=JSON.stringify(schema);
+  // Title, description, canonical, Open Graph and JSON-LD are written by the server so crawlers and link previews see them.
+  $('#demoRibbon').hidden=Boolean(STORE.site_ready);
 }
 async function fetchJson(url,ms=15000){
   const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),ms);
@@ -602,18 +648,25 @@ $('#favoritesToggle').addEventListener('click',()=>{showFavorites=!showFavorites
 $('#cartOpen').addEventListener('click',openDrawer);$('#cartClose').addEventListener('click',closeDrawer);$('#drawerOverlay').addEventListener('click',closeDrawer);
 $('#cartItems').addEventListener('click',e=>{const change=e.target.closest('[data-qty]');if(change){const item=cart.find(x=>String(x.id)===String(change.dataset.qty)),p=PRODUCTS.find(x=>String(x.id)===String(change.dataset.qty));if(item){if(Number(change.dataset.change)>0&&item.qty>=Number(p?.stock||0)){toast(`الكمية المتاحة ${p?.stock||0} فقط`);return}item.qty+=Number(change.dataset.change);if(item.qty<=0)cart=cart.filter(x=>String(x.id)!==String(change.dataset.qty));saveState();renderCart()}return}const remove=e.target.closest('[data-remove]');if(remove){cart=cart.filter(x=>String(x.id)!==String(remove.dataset.remove));saveState();renderCart();toast('حُذف المنتج من السلة');return}if(e.target.closest('#emptyShopLink'))closeDrawer()});
 $('#checkoutBtn').addEventListener('click',startOrder);
-$('#productModalContent').addEventListener('click',e=>{const add=e.target.closest('[data-modal-add]');if(add){addToCart(add.dataset.modalAdd);closeModal($('#productModal'))}});
+$('#productModalContent').addEventListener('click',e=>{const add=e.target.closest('[data-modal-add]');if(add){addToCart(add.dataset.modalAdd);closeModal($('#productModal'));return}const th=e.target.closest('[data-gindex]');if(th){setGalleryImage(Number(th.dataset.gindex));return}const cp=e.target.closest('[data-copy-link]');if(cp)copyLink(cp.dataset.copyLink)});
 $$('[data-close-modal]').forEach(btn=>btn.addEventListener('click',()=>closeModal(btn.closest('.modal-backdrop'))));
 $$('.modal-backdrop').forEach(backdrop=>backdrop.addEventListener('click',e=>{if(e.target===backdrop)closeModal(backdrop)}));
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();$$('.modal-backdrop.open').forEach(closeModal)}});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){closeDrawer();$$('.modal-backdrop.open').forEach(closeModal);return}
+  trapTab(e);
+  if($('#productModal').classList.contains('open')&&(e.key==='ArrowLeft'||e.key==='ArrowRight')&&!/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)){const cur=[...$('#productModalContent').querySelectorAll('[data-gindex]')].findIndex(b=>b.classList.contains('active'));setGalleryImage(cur+(e.key==='ArrowLeft'?1:-1))}
+});
 $('#categoryGrid').addEventListener('click',e=>{const link=e.target.closest('[data-category-link]');if(!link)return;activeFilter=link.dataset.categoryLink;showFavorites=false;$$('.filter-chip').forEach(x=>x.classList.toggle('active',x.dataset.filter===activeFilter));renderProducts()});
 $$('[data-whatsapp]').forEach(button=>button.addEventListener('click',()=>sendWhatsApp(`مرحبًا ${STORE.name}، أود الاستفسار عن الستائر والأقمشة والخدمات.`)));
 $('#orderForm').addEventListener('submit',async e=>{
   e.preventDefault();if(!cart.length){toast('السلة فارغة');return}const formEl=e.currentTarget,btn=formEl.querySelector('button[type=submit]');btn.disabled=true;const form=new FormData(formEl);
-  const payload={name:String(form.get('name')||'').trim(),phone:String(form.get('phone')||'').trim(),city:String(form.get('city')||'').trim(),note:String(form.get('note')||'').trim(),items:cart.map(item=>({product_id:Number(item.id),quantity:item.qty}))};
-  try{const response=await fetch('/api/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const data=await response.json();if(!response.ok)throw new Error(data.error||'تعذر تسجيل الطلب.');cart=[];saveState();renderCart();closeModal($('#orderModal'));formEl.reset();toast(`تم تسجيل طلبك ${data.order_number} بنجاح`)}catch(err){toast(err.message||'تعذر الاتصال بالمتجر؛ حاول مرة أخرى.')}finally{btn.disabled=false}
+  const payload={name:String(form.get('name')||'').trim(),phone:String(form.get('phone')||'').trim(),city:String(form.get('city')||'').trim(),address:String(form.get('address')||'').trim(),note:String(form.get('note')||'').trim(),consent:form.get('consent')==='on',items:cart.map(item=>({product_id:Number(item.id),quantity:item.qty}))};
+  try{const response=await fetch('/api/orders',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':orderKey||(orderKey=newKey())},body:JSON.stringify(payload)});const data=await response.json();if(!response.ok)throw new Error(data.error||'تعذر تسجيل الطلب.');orderKey=null;cart=[];saveState();renderCart();closeModal($('#orderModal'));formEl.reset();toast(`تم تسجيل طلبك ${data.order_number} بنجاح`)}catch(err){toast(err.message||'تعذر الاتصال بالمتجر؛ حاول مرة أخرى.')}finally{btn.disabled=false}
 });
-$('#year').textContent=new Date().getFullYear();renderCategoryFilters();renderProducts();renderCart();loadLiveCatalog();
+$('#year').textContent=new Date().getFullYear();if(isAdmin())$('#adminBar').hidden=false;renderCategoryFilters();renderProducts();renderCart();loadLiveCatalog().then(()=>{
+  const m=location.pathname.match(/^\/product\/([^/]+)/);if(!m)return;const slug=decodeURIComponent(m[1]),p=PRODUCTS.find(x=>x.slug===slug);
+  if(p&&catalogState==='ready'){showProduct(p.id,{push:false})}else if(catalogState==='ready'){toast('هذا المنتج لم يعد متاحًا');history.replaceState(null,'','/')}
+});
 if('serviceWorker' in navigator&&!/AlfakhamahApp\//.test(navigator.userAgent))window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));
 
   </script>

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import gzip
 import hashlib
 import hmac
 import io
@@ -12,8 +13,10 @@ import mimetypes
 import os
 import re
 import secrets
+import signal
 import sqlite3
 import sys
+import threading
 import time
 import traceback
 import unicodedata
@@ -27,6 +30,12 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 BASE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(BASE_DIR))  # sibling modules also when started with `python3 -I app.py`
+import legal  # noqa: E402
+import seo  # noqa: E402
+import totp  # noqa: E402
+
+VERSION = "2.0.0"
 # DATA_DIR holds the mutable state (store.db + uploads/). Point it at a persistent volume in production.
 DATA_DIR = Path(os.environ.get("DATA_DIR") or BASE_DIR).expanduser().resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -46,22 +55,35 @@ TRUST_PROXY = os.environ.get("TRUST_PROXY", "") == "1"
 # Optional canonical origin (https://example.com) used for robots.txt / sitemap.xml.
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
 SESSION_TTL = 12 * 60 * 60
-MAX_BODY = 7 * 1024 * 1024
+MAX_BODY = 512 * 1024                      # default for JSON bodies (orders, settings, login ...)
+MAX_UPLOAD_BODY = 9 * 1024 * 1024         # one base64-encoded image (<= 5 MB) + its thumbnail
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 ORDER_LIMIT = (int(os.environ.get("ORDER_LIMIT_PER_10MIN", "10")), 600)  # public order attempts per client per 10 minutes
 IMAGE_PATH_RE = re.compile(r"/?(?:assets|uploads)/[A-Za-z0-9][A-Za-z0-9._-]*")
+IDEMPOTENT_ORDERS: dict[str, tuple[float, dict]] = {}
 HOST_RE = re.compile(r"[A-Za-z0-9.\-]+(?::\d{1,5})?|\[[0-9A-Fa-f:]+\](?::\d{1,5})?")
 # Root-level files the server may serve (everything else is 404). Values are paths under BASE_DIR.
 PUBLIC_FILES = {
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
     "/admin-manifest.webmanifest": ("admin-manifest.webmanifest", "application/manifest+json"),
     "/sw.js": ("sw.js", "text/javascript"),
-    "/offline.html": ("offline.html", "text/html"),
     "/favicon.ico": ("icons/favicon.ico", "image/x-icon"),
 }
-CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-       "script-src 'self' 'unsafe-inline'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; "
-       "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+DEFAULT_SHARE_IMAGE = "/assets/wavy-11.jpg"
+COMPRESSIBLE = ("text/", "application/json", "application/javascript", "application/manifest+json", "application/xml", "image/svg+xml")
+LOG_JSON = os.environ.get("LOG_FORMAT", "") == "json"
+IDEMPOTENCY_TTL = 600
+
+
+def build_csp(nonce: str, secure: bool) -> str:
+    """No 'unsafe-inline' for scripts or <style> blocks: only our own files and tags carrying this response's nonce.
+    Style *attributes* (style="...") stay allowed; they cannot run code."""
+    parts = ["default-src 'self'", "img-src 'self' data:", f"style-src 'self' 'nonce-{nonce}'", "style-src-attr 'unsafe-inline'",
+             f"script-src 'self' 'nonce-{nonce}'", "connect-src 'self'", "manifest-src 'self'", "worker-src 'self'",
+             "object-src 'none'", "base-uri 'self'", "form-action 'self'", "frame-ancestors 'none'"]
+    if secure:
+        parts.append("upgrade-insecure-requests")
+    return "; ".join(parts)
 
 CATEGORIES = [
     ("curtains", "ستائر تفصيل", 1),
@@ -130,10 +152,12 @@ ORDER_STATUSES = {
 
 
 class APIError(Exception):
-    def __init__(self, message: str, status: int = 400):
+    def __init__(self, message: str, status: int = 400, headers: dict | None = None, extra: dict | None = None):
         super().__init__(message)
         self.message = message
         self.status = status
+        self.headers = headers or {}
+        self.extra = extra or {}
 
 
 @contextmanager
@@ -201,6 +225,14 @@ def init_db() -> str | None:
             updated_at TEXT NOT NULL
           );
           CREATE INDEX IF NOT EXISTS idx_products_active ON products(active, category, id);
+          CREATE TABLE IF NOT EXISTS product_images (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+            path TEXT NOT NULL,
+            thumb TEXT NOT NULL DEFAULT '',
+            position INTEGER NOT NULL DEFAULT 0
+          );
+          CREATE INDEX IF NOT EXISTS idx_product_images ON product_images(product_id, position);
           CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL DEFAULT ''
@@ -237,6 +269,11 @@ def init_db() -> str | None:
             quantity INTEGER NOT NULL
           );
         """)
+        for table, column, ddl in (("categories", "image", "TEXT NOT NULL DEFAULT ''"),
+                                   ("orders", "consent_at", "TEXT NOT NULL DEFAULT ''"),
+                                   ("admins", "totp_secret", "TEXT NOT NULL DEFAULT ''")):
+            if column not in {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
         for slug, name, order in CATEGORIES:
             conn.execute("INSERT OR IGNORE INTO categories(slug,name,sort_order,active) VALUES(?,?,?,1)", (slug, name, order))
         for key, value in DEFAULT_SETTINGS.items():
@@ -261,6 +298,12 @@ def init_db() -> str | None:
                              (f"ستائر ويفي تفصيل حسب الطلب — موديل {number}", f"wavy-{number:02d}", "curtains", WAVY_DESCRIPTION,
                               f"/assets/wavy-{number:02d}.jpg", WAVY_ALTS[number - 1], "تفصيل حسب الطلب", f"FAL-WAV-{number:03d}", ts, ts))
             conn.execute("INSERT INTO settings(key,value) VALUES('seed_wavy_v1','1')")
+        conn.execute("INSERT INTO product_images(product_id,path,thumb,position) SELECT id,image,'',0 FROM products "
+                     "WHERE image!='' AND id NOT IN (SELECT product_id FROM product_images)")
+        for row in conn.execute("SELECT id,path FROM product_images WHERE thumb='' AND path LIKE '/assets/wavy-%'").fetchall():
+            thumb = thumb_for(row["path"])
+            if thumb:
+                conn.execute("UPDATE product_images SET thumb=? WHERE id=?", (thumb, row["id"]))
         # Earlier versions stored relative image paths ("assets/x.jpg") that break under /admin/.
         conn.execute("UPDATE products SET image='/'||image WHERE image LIKE 'assets/%' OR image LIKE 'uploads/%'")
         admin = conn.execute("SELECT username FROM admins LIMIT 1").fetchone()
@@ -326,6 +369,49 @@ def save_image_data(data_uri: str) -> str:
     return f"/uploads/{filename}"
 
 
+def thumb_for(path: str) -> str:
+    """Bundled photos have a 600px thumbnail next to them: /assets/wavy-01.jpg -> /assets/wavy-01-t.jpg."""
+    match = re.fullmatch(r"/assets/([A-Za-z0-9._-]+)\.jpg", path or "")
+    if match and (ASSETS_DIR / f"{match.group(1)}-t.jpg").is_file():
+        return f"/assets/{match.group(1)}-t.jpg"
+    return ""
+
+
+def image_file_exists(url: str) -> bool:
+    """True for an existing file under assets/ or uploads/ (the only places product images may live)."""
+    if not IMAGE_PATH_RE.fullmatch(url or ""):
+        return False
+    url = "/" + url.lstrip("/")
+    root = ASSETS_DIR if url.startswith("/assets/") else UPLOAD_DIR
+    return (root / url.split("/", 2)[2]).is_file()
+
+
+def images_for(conn: sqlite3.Connection, product_ids: list[int]) -> dict[int, list[dict]]:
+    """Gallery of every product in one query: {product_id: [{"url","thumb"}, ...]} in display order."""
+    result: dict[int, list[dict]] = {pid: [] for pid in product_ids}
+    if not product_ids:
+        return result
+    marks = ",".join("?" * len(product_ids))
+    for row in conn.execute(f"SELECT product_id,path,thumb FROM product_images WHERE product_id IN ({marks}) ORDER BY product_id,position,id", product_ids):
+        result[row["product_id"]].append({"url": public_image(row["path"]), "thumb": public_image(row["thumb"]) or public_image(row["path"])})
+    return result
+
+
+MAX_GALLERY = 12
+
+
+def drop_unreferenced_uploads(conn: sqlite3.Connection, paths) -> None:
+    """Delete uploaded files (never bundled assets) that no product or category uses any more."""
+    for path in {p for p in paths if p and p.startswith("/uploads/")}:
+        used = conn.execute("SELECT 1 FROM product_images WHERE path=? OR thumb=? UNION SELECT 1 FROM products WHERE image=? "
+                            "UNION SELECT 1 FROM categories WHERE image=? LIMIT 1", (path, path, path, path)).fetchone()
+        if not used and IMAGE_PATH_RE.fullmatch(path.lstrip("/")):
+            try:
+                (UPLOAD_DIR / path.split("/", 2)[2]).unlink()
+            except OSError:
+                pass
+
+
 def public_image(value: str) -> str:
     """Images are always served from the site root, whichever page (/ or /admin/) requests them."""
     value = value or ""
@@ -334,8 +420,10 @@ def public_image(value: str) -> str:
     return value
 
 
-def product_dict(row: sqlite3.Row, category_name: str | None = None) -> dict:
+def product_dict(row: sqlite3.Row, category_name: str | None = None, images: list[dict] | None = None) -> dict:
+    gallery = images or ([{"url": public_image(row["image"]), "thumb": public_image(row["image"])}] if row["image"] else [])
     return {
+        "images": gallery, "thumb": gallery[0]["thumb"] if gallery else "",
         "id": row["id"], "name": row["name"], "slug": row["slug"], "category": row["category"],
         "category_name": category_name or "", "description": row["description"], "price": row["price"],
         "image": public_image(row["image"]), "alt": row["alt"], "badge": row["badge"], "sku": row["sku"],
@@ -386,12 +474,25 @@ def allow_attempt(table: dict[str, list[float]], key: str, limit: int, window: i
 
 
 class StoreHandler(BaseHTTPRequestHandler):
-    server_version = "FakhamahStore/1.0"
+    server_version = "FakhamahStore"
     sys_version = ""
+    request_id = "-"
+    started = 0.0
+    status_sent = 0
+
+    def log_request(self, code="-", size="-") -> None:
+        if not LOG_JSON:
+            return super().log_request(code, size)
+        sys.stderr.write(json.dumps({"ts": now_iso(), "ip": self.client_ip(), "method": self.command, "path": self.path.split("?")[0],
+                                     "status": code, "ms": round((time.time() - self.started) * 1000), "rid": self.request_id},
+                                    ensure_ascii=False) + "\n")
 
     def log_message(self, fmt: str, *args) -> None:
         # Keep access logs useful without dumping request bodies or credentials.
-        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+        if LOG_JSON:
+            sys.stderr.write(json.dumps({"ts": now_iso(), "msg": fmt % args}, ensure_ascii=False) + "\n")
+        else:
+            sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
     def client_ip(self) -> str:
         if TRUST_PROXY:
@@ -412,42 +513,71 @@ class StoreHandler(BaseHTTPRequestHandler):
             host = f"localhost:{PORT}"
         return f"{'https' if self.is_secure() else 'http'}://{host}"
 
-    def _send(self, status: int, body: bytes, content_type: str = "application/json; charset=utf-8", headers: dict | None = None) -> None:
+    def _send(self, status: int, body: bytes, content_type: str = "application/json; charset=utf-8", headers: dict | None = None, nonce: str | None = None) -> None:
         path = urlsplit(self.path).path
         out = {
             "Content-Type": content_type,
-            "Content-Length": str(len(body)),
             "X-Content-Type-Options": "nosniff",
             "X-Frame-Options": "DENY",
             "Referrer-Policy": "strict-origin-when-cross-origin",
             "Permissions-Policy": "geolocation=(), microphone=(), payment=(), usb=()",
+            "Cross-Origin-Opener-Policy": "same-origin",
+            "Cross-Origin-Resource-Policy": "cross-origin" if path.startswith(("/assets/", "/uploads/", "/icons/")) else "same-site",
             "Cache-Control": "no-store",
+            "X-Request-ID": self.request_id,
             "Connection": "close",
         }
-        if content_type.startswith("text/html"):
-            out["Content-Security-Policy"] = CSP
+        if content_type.startswith("text/html") and nonce:
+            out["Content-Security-Policy"] = build_csp(nonce, self.is_secure())
         if path.startswith(("/admin", "/api/admin")):
             out["X-Robots-Tag"] = "noindex, nofollow"
         if self.is_secure():
             out["Strict-Transport-Security"] = "max-age=15552000"
         out.update(headers or {})  # callers may override, e.g. Cache-Control for static files
+        mime = content_type.split(";")[0].strip()
+        compressible = mime.startswith(COMPRESSIBLE)
+        if compressible:
+            out["Vary"] = "Accept-Encoding"
+        etag = out.get("ETag")
+        # Conditional GET: unchanged resources cost a few bytes instead of the whole body.
+        if status == 200 and etag and self.command in ("GET", "HEAD"):
+            client = [t.strip() for t in self.headers.get("If-None-Match", "").split(",")]
+            if etag in client or etag.removeprefix("W/") in [c.removeprefix("W/") for c in client]:
+                status, body = 304, b""
+        if status == 200 and compressible and len(body) >= 800 and "gzip" in self.headers.get("Accept-Encoding", "") and "Content-Encoding" not in out:
+            body = gzip.compress(body, 6, mtime=0)
+            out["Content-Encoding"] = "gzip"
+            if etag and not etag.startswith("W/"):
+                out["ETag"] = "W/" + etag
+        out["Content-Length"] = str(len(body))
         self.send_response(status)
         for key, value in out.items():
-            self.send_header(key, value)
+            for item in (value if isinstance(value, list) else [value]):
+                self.send_header(key, item)
         self.end_headers()
-        if self.command != "HEAD":
+        if self.command != "HEAD" and status != 304:
             self.wfile.write(body)
 
-    def send_json(self, data, status: int = 200, headers: dict | None = None) -> None:
+    def send_json(self, data, status: int = 200, headers: dict | None = None, revalidate: bool = False) -> None:
         body = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        self._send(status, body, "application/json; charset=utf-8", headers)
+        extra = dict(headers or {})
+        if revalidate:  # public catalogue data: always revalidated, but cheap thanks to the ETag
+            extra.setdefault("ETag", 'W/"' + hashlib.sha1(body).hexdigest()[:24] + '"')
+            extra.setdefault("Cache-Control", "no-cache")
+        self._send(status, body, "application/json; charset=utf-8", extra)
 
-    def read_json(self) -> dict:
+    def render_html(self, markup: str, status: int = 200, headers: dict | None = None) -> None:
+        """Send an HTML page whose <script>/<style> tags carry a fresh CSP nonce (no 'unsafe-inline')."""
+        nonce = secrets.token_urlsafe(16)
+        markup = re.sub(r"<(script|style)(?![^>]*\bnonce=)", lambda m: f'<{m.group(1)} nonce="{nonce}"', markup)
+        self._send(status, markup.encode("utf-8"), "text/html; charset=utf-8", {"Cache-Control": "no-cache", **(headers or {})}, nonce=nonce)
+
+    def read_json(self, limit: int | None = None) -> dict:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             raise APIError("حجم الطلب غير صالح.", 400)
-        if length > MAX_BODY:
+        if length > (limit or MAX_BODY):
             raise APIError("الطلب أكبر من الحد المسموح.", 413)
         raw = self.rfile.read(max(0, length))
         try:
@@ -485,10 +615,12 @@ class StoreHandler(BaseHTTPRequestHandler):
         return {"token": token, **session}
 
     def _run(self) -> None:
+        self.request_id = uuid.uuid4().hex[:16]
+        self.started = time.time()
         try:
             self.route()
         except APIError as exc:
-            self.send_json({"error": exc.message}, exc.status)
+            self.send_json({"error": exc.message, **exc.extra}, exc.status, exc.headers)
         except BrokenPipeError:
             pass
         except Exception:
@@ -506,9 +638,21 @@ class StoreHandler(BaseHTTPRequestHandler):
     def do_HEAD(self): self._run()
 
     def create_order(self) -> None:
+        # Idempotency-Key: a retry of the same submission (flaky mobile network) returns the first result instead of
+        # creating a second order.
+        key = self.headers.get("Idempotency-Key", "").strip()
+        if key and not re.fullmatch(r"[A-Za-z0-9_\-]{8,64}", key):
+            raise APIError("مفتاح التكرار غير صالح.")
+        now = time.time()
+        for stale in [k for k, (exp, _) in IDEMPOTENT_ORDERS.items() if exp < now]:
+            IDEMPOTENT_ORDERS.pop(stale, None)
+        if key and key in IDEMPOTENT_ORDERS:
+            self.send_json(IDEMPOTENT_ORDERS[key][1], 200, {"Idempotent-Replayed": "true"}); return
         if not allow_attempt(ORDER_ATTEMPTS, self.client_ip(), *ORDER_LIMIT):
-            raise APIError("تم إرسال طلبات كثيرة خلال وقت قصير. حاول بعد قليل أو تواصل مع المتجر هاتفيًا.", 429)
+            raise APIError("تم إرسال طلبات كثيرة خلال وقت قصير. حاول بعد قليل أو تواصل مع المتجر هاتفيًا.", 429, {"Retry-After": str(ORDER_LIMIT[1])})
         data = self.read_json()
+        if data.get("consent") is not True:
+            raise APIError("يلزم الموافقة على سياسة الخصوصية لإرسال الطلب.")
         name = str(data.get("name", "")).strip()[:120]
         phone = str(data.get("phone", "")).strip()[:30]
         city = str(data.get("city", "")).strip()[:100]
@@ -541,9 +685,9 @@ class StoreHandler(BaseHTTPRequestHandler):
             delivery_fee = int(settings.get("delivery_fee", "0") or 0)
             total = subtotal + delivery_fee
             created = now_iso()
-            cursor = conn.execute("""INSERT INTO orders(order_number,customer_name,phone,city,address,notes,status,subtotal,delivery_fee,total,created_at,updated_at)
-                                      VALUES('PENDING',?,?,?,?,?,'new',?,?,?,?,?)""",
-                                  (name, phone, city, address, notes, subtotal, delivery_fee, total, created, created))
+            cursor = conn.execute("""INSERT INTO orders(order_number,customer_name,phone,city,address,notes,status,subtotal,delivery_fee,total,created_at,updated_at,consent_at)
+                                      VALUES('PENDING',?,?,?,?,?,'new',?,?,?,?,?,?)""",
+                                  (name, phone, city, address, notes, subtotal, delivery_fee, total, created, created, created))
             order_id = cursor.lastrowid
             order_number = f"MH-{datetime.now().strftime('%y%m%d')}-{order_id:05d}"
             conn.execute("UPDATE orders SET order_number=? WHERE id=?", (order_number, order_id))
@@ -551,8 +695,11 @@ class StoreHandler(BaseHTTPRequestHandler):
                 conn.execute("INSERT INTO order_items(order_id,product_id,product_name,sku,unit_price,quantity) VALUES(?,?,?,?,?,?)",
                              (order_id, row["id"], row["name"], row["sku"], row["price"], quantity))
                 conn.execute("UPDATE products SET stock=stock-?,updated_at=? WHERE id=?", (quantity, created, row["id"]))
-        self.send_json({"ok": True, "order_id": order_id, "order_number": order_number, "subtotal": subtotal,
-                        "delivery_fee": delivery_fee, "total": total}, 201)
+        result = {"ok": True, "order_id": order_id, "order_number": order_number, "subtotal": subtotal,
+                  "delivery_fee": delivery_fee, "total": total}
+        if key:
+            IDEMPOTENT_ORDERS[key] = (time.time() + IDEMPOTENCY_TTL, result)
+        self.send_json(result, 201)
 
     def export_orders(self) -> None:
         with connect_db() as conn:
@@ -569,10 +716,6 @@ class StoreHandler(BaseHTTPRequestHandler):
         """Map a URL path to a file. Only whitelisted pages and the assets/uploads/icons folders are reachable."""
         if "\x00" in path or "\\" in path:
             return None
-        if path in ("/", "/index.html"):
-            return BASE_DIR / "index.html", None
-        if path in ("/admin", "/admin/", "/admin.html"):
-            return BASE_DIR / "admin.html", None
         if path in PUBLIC_FILES:
             name, content_type = PUBLIC_FILES[path]
             return BASE_DIR / name, content_type
@@ -589,7 +732,54 @@ class StoreHandler(BaseHTTPRequestHandler):
                 return target, None
         return None
 
+    def serve_index(self, slug: str | None) -> None:
+        """The storefront page with its <head> written for this URL (storefront, or one product for /product/<slug>)."""
+        template = (BASE_DIR / "index.html").read_text(encoding="utf-8")
+        base = self.base_url()
+        with connect_db() as conn:
+            settings = get_settings(conn)
+            product = None
+            if slug:
+                row = conn.execute("SELECT p.*,c.name AS category_name FROM products p JOIN categories c ON c.slug=p.category "
+                                   "WHERE p.slug=? AND p.active=1 AND c.active=1", (slug,)).fetchone()
+                if row:
+                    product = product_dict(row, row["category_name"], images_for(conn, [row["id"]])[row["id"]])
+        ready = settings.get("site_ready", "0") == "1"
+        store = settings.get("store_name") or seo.SITE_NAME_FALLBACK
+        robots = "index,follow,max-image-preview:large" if ready else "noindex,nofollow"
+        status = 200
+        if product:
+            summary = re.sub(r"\s+", " ", product["description"]).strip()[:155] or settings.get("seo_description", "")
+            image = seo.absolute(base, product["image"] or DEFAULT_SHARE_IMAGE)
+            page = seo.render_page(
+                template, title=f"{product['name']} | {store}", description=summary, robots=robots,
+                canonical=(base + seo.product_path(product["slug"])) if ready else "", og_url=base + seo.product_path(product["slug"]),
+                og_image=image, og_type="product", schemas=seo.product_schema(product, settings, base), site_name=store,
+                image_alt=product.get("alt") or product["name"])
+        else:
+            if slug:
+                status, robots = 404, "noindex,nofollow"
+            page = seo.render_page(
+                template, title=settings.get("seo_title") or store, description=settings.get("seo_description", ""), robots=robots,
+                canonical=(base + "/") if (ready and not slug) else "", og_url=base + "/" if ready else "",
+                og_image=seo.absolute(base, DEFAULT_SHARE_IMAGE), og_type="website",
+                schemas=[seo.store_schema(settings, base, ready, DEFAULT_SHARE_IMAGE), seo.website_schema(settings, base)],
+                site_name=store, preload_image=None if slug else DEFAULT_SHARE_IMAGE, image_alt=store)
+        self.render_html(page, status)
+
     def serve_static(self, path: str) -> None:
+        if path in ("/", "/index.html"):
+            return self.serve_index(None)
+        product_match = re.fullmatch(r"/product/([^/]+)", path)
+        if product_match:
+            return self.serve_index(product_match.group(1))
+        if path in legal.PAGES:
+            with connect_db() as conn:
+                return self.render_html(legal.render(path, get_settings(conn)))
+        if path in ("/admin", "/admin/", "/admin.html"):
+            return self.render_html((BASE_DIR / "admin.html").read_text(encoding="utf-8"))
+        if path == "/offline.html":
+            return self.render_html((BASE_DIR / "offline.html").read_text(encoding="utf-8"))
         found = self.resolve_static(path)
         if not found or not found[0].is_file():
             self._send(404, b"Not found", "text/plain; charset=utf-8"); return
@@ -599,11 +789,14 @@ class StoreHandler(BaseHTTPRequestHandler):
             content_type += "; charset=utf-8"
         try:
             body = target.read_bytes()
+            stat = target.stat()
         except OSError:
             self._send(500, b"Unable to read file", "text/plain; charset=utf-8"); return
-        headers = {"Last-Modified": formatdate(target.stat().st_mtime, usegmt=True)}
-        if path.startswith(("/assets/", "/uploads/", "/icons/")):
-            headers["Cache-Control"] = "public, max-age=3600"
+        headers = {"Last-Modified": formatdate(stat.st_mtime, usegmt=True), "ETag": f'W/"{stat.st_size}-{stat.st_mtime_ns}"'}
+        if path.startswith("/uploads/"):
+            headers["Cache-Control"] = "public, max-age=31536000, immutable"   # uploads get a random name: never reused
+        elif path.startswith(("/assets/", "/icons/")):
+            headers["Cache-Control"] = "public, max-age=86400"
         else:
             headers["Cache-Control"] = "no-cache"
         if path == "/sw.js":
@@ -613,23 +806,36 @@ class StoreHandler(BaseHTTPRequestHandler):
     def handle_login(self, data: dict) -> None:
         username = str(data.get("username", "")).strip()[:100]
         password = str(data.get("password", ""))[:200]
+        code = str(data.get("code", ""))[:12]
         ip = self.client_ip()
         now = time.time()
         recent = [t for t in LOGIN_FAILURES.get(ip, []) if now - t < 300]
         if len(recent) >= 8:
-            raise APIError("محاولات كثيرة. انتظر بضع دقائق ثم حاول مرة أخرى.", 429)
+            raise APIError("محاولات كثيرة. انتظر بضع دقائق ثم حاول مرة أخرى.", 429, {"Retry-After": "300"})
         with connect_db() as conn:
-            admin = conn.execute("SELECT username,password_hash FROM admins WHERE username=?", (username,)).fetchone()
+            admin = conn.execute("SELECT username,password_hash,totp_secret FROM admins WHERE username=?", (username,)).fetchone()
         if not admin or not verify_password(password, admin["password_hash"]):
             recent.append(now); LOGIN_FAILURES[ip] = recent
             raise APIError("اسم المستخدم أو كلمة المرور غير صحيحة.", 401)
+        if admin["totp_secret"]:
+            # Second factor: password alone is not enough once the admin enabled an authenticator app.
+            if not code:
+                raise APIError("أدخل رمز التحقق من تطبيق المصادقة.", 401, extra={"need_code": True})
+            if not totp.verify(admin["totp_secret"], code):
+                recent.append(now); LOGIN_FAILURES[ip] = recent
+                raise APIError("رمز التحقق غير صحيح أو منتهٍ.", 401, extra={"need_code": True})
         LOGIN_FAILURES.pop(ip, None)
         purge_expired(SESSIONS, 0, key_expires=True)
         token = secrets.token_urlsafe(36)
         csrf = secrets.token_urlsafe(24)
         SESSIONS[token] = {"username": admin["username"], "csrf": csrf, "expires": now + SESSION_TTL}
         self.send_json({"ok": True, "username": admin["username"], "csrf": csrf}, 200,
-                       {"Set-Cookie": self.session_cookie(token, SESSION_TTL)})
+                       {"Set-Cookie": [self.session_cookie(token, SESSION_TTL), self.flag_cookie(SESSION_TTL)]})
+
+    def flag_cookie(self, max_age: int) -> str:
+        """Readable marker (no secret) that lets the storefront show its admin bar without probing the API."""
+        secure = "; Secure" if self.is_secure() else ""
+        return f"fakhama_admin_flag={'1' if max_age else ''}; Path=/; SameSite=Lax; Max-Age={max_age}{secure}"
 
     def session_cookie(self, value: str, max_age: int) -> str:
         secure = "; Secure" if self.is_secure() else ""
@@ -652,18 +858,36 @@ class StoreHandler(BaseHTTPRequestHandler):
             if not cat: raise APIError("القسم المحدد غير موجود أو غير مفعّل.")
             old = conn.execute("SELECT * FROM products WHERE id=?", (product_id,)).fetchone() if product_id else None
             if product_id and not old: raise APIError("المنتج غير موجود.", 404)
-            image = old["image"] if old else ""
-            if data.get("image_data"):
-                image = save_image_data(data["image_data"])
-            elif data.get("image"):
-                image_value = str(data["image"]).strip()
-                # Only an existing file under assets/ or uploads/ is accepted; anything else keeps the current image.
-                if IMAGE_PATH_RE.fullmatch(image_value):
-                    image_value = "/" + image_value.lstrip("/")
-                    root = ASSETS_DIR if image_value.startswith("/assets/") else UPLOAD_DIR
-                    if (root / image_value.split("/", 2)[2]).is_file():
-                        image = image_value
-            if not image: raise APIError("أضف صورة للمنتج.")
+            # Gallery API: "images" = photos to keep (in display order), "new_images" = uploads [{data, thumb}].
+            # The first photo is the primary one. Legacy clients may still send a single "image" / "image_data",
+            # which replaces the primary photo as before.
+            existing_rows = conn.execute("SELECT path,thumb FROM product_images WHERE product_id=? ORDER BY position,id", (product_id,)).fetchall() if old else []
+            existing = {public_image(r["path"]): r["thumb"] for r in existing_rows}
+            def usable(url) -> str:
+                url = public_image(str(url or "").strip())
+                return url if url and (url in existing or image_file_exists(url)) else ""
+            new_images = data.get("new_images") or []
+            if not isinstance(new_images, list): raise APIError("صيغة الصور غير صحيحة.")
+            if isinstance(data.get("images"), list) or new_images:
+                kept = data["images"] if isinstance(data.get("images"), list) else [r["path"] for r in existing_rows]
+                gallery = []
+                for entry in kept:
+                    url = usable(entry.get("url") if isinstance(entry, dict) else entry)
+                    if url and url not in [g[0] for g in gallery]:
+                        sent_thumb = public_image(str(entry.get("thumb") or "")) if isinstance(entry, dict) else ""
+                        gallery.append((url, existing.get(url) or (sent_thumb if sent_thumb and image_file_exists(sent_thumb) else "") or thumb_for(url)))
+                for item in new_images[:MAX_GALLERY]:
+                    if not isinstance(item, dict) or not item.get("data"): raise APIError("صيغة الصور غير صحيحة.")
+                    gallery.append((save_image_data(item["data"]), save_image_data(item["thumb"]) if item.get("thumb") else ""))
+            elif data.get("image_data"):
+                gallery = [(save_image_data(data["image_data"]), "")]
+            elif usable(data.get("image")):
+                url = usable(data["image"]); gallery = [(url, existing.get(url) or thumb_for(url))]
+            else:
+                gallery = [(public_image(r["path"]), r["thumb"]) for r in existing_rows]
+            if not gallery: raise APIError("أضف صورة للمنتج.")
+            if len(gallery) > MAX_GALLERY: raise APIError(f"الحد الأقصى {MAX_GALLERY} صورة لكل منتج.")
+            image = gallery[0][0]
             slug_base = slugify(str(data.get("slug", name)))
             slug = slug_base
             n = 2
@@ -683,8 +907,14 @@ class StoreHandler(BaseHTTPRequestHandler):
                                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                                    (name, slug, category, description, price, image, alt, badge, sku, stock, featured, active, ts, ts))
                 result_id = cur.lastrowid
+            previous = [r["path"] for r in conn.execute("SELECT path FROM product_images WHERE product_id=? UNION SELECT thumb FROM product_images WHERE product_id=?", (result_id, result_id))]
+            conn.execute("DELETE FROM product_images WHERE product_id=?", (result_id,))
+            for position, (url, thumb) in enumerate(gallery):
+                conn.execute("INSERT INTO product_images(product_id,path,thumb,position) VALUES(?,?,?,?)", (result_id, url, thumb, position))
+            drop_unreferenced_uploads(conn, previous)
             row = conn.execute("SELECT p.*,c.name AS category_name FROM products p JOIN categories c ON c.slug=p.category WHERE p.id=?", (result_id,)).fetchone()
-        self.send_json({"ok": True, "product": product_dict(row, row["category_name"])}, 200 if product_id else 201)
+            product = product_dict(row, row["category_name"], images_for(conn, [result_id])[result_id])
+        self.send_json({"ok": True, "product": product}, 200 if product_id else 201)
 
     def route_mutation(self) -> None:
         path = unquote(urlsplit(self.path).path)
@@ -694,50 +924,77 @@ class StoreHandler(BaseHTTPRequestHandler):
             session = self.require_admin(write=True)
             if not session: return
             SESSIONS.pop(session["token"], None)
-            self.send_json({"ok": True}, 200, {"Set-Cookie": self.session_cookie("", 0)}); return
+            self.send_json({"ok": True}, 200, {"Set-Cookie": [self.session_cookie("", 0), self.flag_cookie(0)]}); return
+        if path == "/api/admin/upload" and self.command == "POST":
+            if not self.require_admin(write=True): return
+            data = self.read_json(MAX_UPLOAD_BODY)
+            url = save_image_data(data.get("data"))
+            thumb = save_image_data(data["thumb"]) if data.get("thumb") else ""
+            self.send_json({"ok": True, "url": url, "thumb": thumb}, 201); return
         if path == "/api/admin/products" and self.command == "POST":
             if not self.require_admin(write=True): return
-            self.save_product(None, self.read_json()); return
+            self.save_product(None, self.read_json(MAX_UPLOAD_BODY)); return
         match = re.fullmatch(r"/api/admin/products/(\d+)", path)
         if match and self.command == "PUT":
             if not self.require_admin(write=True): return
-            self.save_product(int(match.group(1)), self.read_json()); return
+            self.save_product(int(match.group(1)), self.read_json(MAX_UPLOAD_BODY)); return
         if match and self.command == "DELETE":
             if not self.require_admin(write=True): return
             product_id = int(match.group(1))
             with connect_db() as conn:
+                owned = [r[0] for r in conn.execute("SELECT path FROM product_images WHERE product_id=? UNION SELECT thumb FROM product_images WHERE product_id=?", (product_id, product_id))]
                 cur = conn.execute("DELETE FROM products WHERE id=?", (product_id,))
                 if not cur.rowcount: raise APIError("المنتج غير موجود.", 404)
+                drop_unreferenced_uploads(conn, owned)
             self.send_json({"ok": True}); return
         if path == "/api/admin/categories" and self.command == "POST":
             if not self.require_admin(write=True): return
-            data = self.read_json(); name = str(data.get("name", "")).strip()[:80]
+            data = self.read_json(MAX_UPLOAD_BODY); name = str(data.get("name", "")).strip()[:80]
             slug = slugify(str(data.get("slug") or name))
             if len(name) < 2: raise APIError("اسم القسم مطلوب.")
             with connect_db() as conn:
                 if conn.execute("SELECT 1 FROM categories WHERE slug=?", (slug,)).fetchone(): raise APIError("يوجد قسم بهذا الرابط بالفعل.", 409)
                 sort = conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM categories").fetchone()[0]
-                conn.execute("INSERT INTO categories(slug,name,sort_order,active) VALUES(?,?,?,1)", (slug, name, sort))
-            self.send_json({"ok": True, "slug": slug, "name": name}, 201); return
+                image = save_image_data(data["image_data"]) if data.get("image_data") else (public_image(str(data.get("image"))) if image_file_exists(public_image(str(data.get("image") or ""))) else "")
+                conn.execute("INSERT INTO categories(slug,name,sort_order,active,image) VALUES(?,?,?,1,?)", (slug, name, sort, image))
+            self.send_json({"ok": True, "slug": slug, "name": name, "image": image}, 201); return
+        if path == "/api/admin/categories/reorder" and self.command == "POST":
+            if not self.require_admin(write=True): return
+            order = self.read_json().get("order")
+            if not isinstance(order, list) or not all(isinstance(x, str) for x in order): raise APIError("ترتيب الأقسام غير صالح.")
+            with connect_db() as conn:
+                known = {r["slug"] for r in conn.execute("SELECT slug FROM categories")}
+                if set(order) != known: raise APIError("قائمة الأقسام لا تطابق الأقسام الحالية؛ حدّث الصفحة.", 409)
+                for position, slug in enumerate(order, 1):
+                    conn.execute("UPDATE categories SET sort_order=? WHERE slug=?", (position, slug))
+            self.send_json({"ok": True}); return
         match = re.fullmatch(r"/api/admin/categories/([\w\-]+)", path, re.UNICODE)
         if match and self.command == "PUT":
             if not self.require_admin(write=True): return
             slug = match.group(1)
-            data = self.read_json(); name = str(data.get("name", "")).strip()[:80]
+            data = self.read_json(MAX_UPLOAD_BODY); name = str(data.get("name", "")).strip()[:80]
             active = 1 if data.get("active", True) else 0
             if len(name) < 2: raise APIError("اسم القسم مطلوب.")
             with connect_db() as conn:
-                cur = conn.execute("UPDATE categories SET name=?,active=? WHERE slug=?", (name, active, slug))
-                if not cur.rowcount: raise APIError("القسم غير موجود.", 404)
-            self.send_json({"ok": True, "slug": slug, "name": name, "active": bool(active)}); return
+                row = conn.execute("SELECT image FROM categories WHERE slug=?", (slug,)).fetchone()
+                if not row: raise APIError("القسم غير موجود.", 404)
+                image = row["image"]
+                if data.get("image_data"): image = save_image_data(data["image_data"])
+                elif data.get("remove_image"): image = ""
+                elif image_file_exists(public_image(str(data.get("image") or ""))): image = public_image(str(data["image"]))
+                conn.execute("UPDATE categories SET name=?,active=?,image=? WHERE slug=?", (name, active, image, slug))
+                if image != row["image"]: drop_unreferenced_uploads(conn, [row["image"]])
+            self.send_json({"ok": True, "slug": slug, "name": name, "active": bool(active), "image": image}); return
         if match and self.command == "DELETE":
             if not self.require_admin(write=True): return
             slug = match.group(1)
             with connect_db() as conn:
                 count = conn.execute("SELECT COUNT(*) FROM products WHERE category=?", (slug,)).fetchone()[0]
                 if count: raise APIError("انقل منتجات هذا القسم أو احذفها قبل حذف القسم.", 409)
+                old_image = (conn.execute("SELECT image FROM categories WHERE slug=?", (slug,)).fetchone() or {"image": ""})["image"]
                 cur = conn.execute("DELETE FROM categories WHERE slug=?", (slug,))
                 if not cur.rowcount: raise APIError("القسم غير موجود.", 404)
+                drop_unreferenced_uploads(conn, [old_image])
             self.send_json({"ok": True}); return
         if path == "/api/admin/settings" and self.command == "PUT":
             if not self.require_admin(write=True): return
@@ -760,6 +1017,37 @@ class StoreHandler(BaseHTTPRequestHandler):
                     conn.execute("INSERT INTO settings(key,value) VALUES('delivery_fee',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(fee),))
                 settings = get_settings(conn)
             self.send_json({"ok": True, "settings": settings}); return
+        if path == "/api/admin/2fa/setup" and self.command == "POST":
+            session = self.require_admin(write=True)
+            if not session: return
+            with connect_db() as conn:
+                row = conn.execute("SELECT totp_secret FROM admins WHERE username=?", (session["username"],)).fetchone()
+                store = get_settings(conn).get("store_name") or seo.SITE_NAME_FALLBACK
+            if row and row["totp_secret"]: raise APIError("التحقق بخطوتين مفعّل بالفعل.", 409)
+            secret = totp.new_secret()
+            SESSIONS[session["token"]]["totp_pending"] = secret
+            self.send_json({"secret": secret, "otpauth": totp.otpauth_uri(secret, session["username"], store)}); return
+        if path == "/api/admin/2fa/enable" and self.command == "POST":
+            session = self.require_admin(write=True)
+            if not session: return
+            pending = SESSIONS.get(session["token"], {}).get("totp_pending")
+            if not pending: raise APIError("ابدأ الإعداد أولًا.", 409)
+            if not totp.verify(pending, str(self.read_json().get("code", ""))): raise APIError("رمز التحقق غير صحيح. تأكد من ساعة الهاتف وحاول مجددًا.")
+            with connect_db() as conn:
+                conn.execute("UPDATE admins SET totp_secret=?,updated_at=? WHERE username=?", (pending, now_iso(), session["username"]))
+            SESSIONS[session["token"]].pop("totp_pending", None)
+            self.send_json({"ok": True}); return
+        if path == "/api/admin/2fa/disable" and self.command == "POST":
+            session = self.require_admin(write=True)
+            if not session: return
+            data = self.read_json()
+            with connect_db() as conn:
+                row = conn.execute("SELECT password_hash,totp_secret FROM admins WHERE username=?", (session["username"],)).fetchone()
+                if not row or not row["totp_secret"]: raise APIError("التحقق بخطوتين غير مفعّل.", 409)
+                if not verify_password(str(data.get("password", "")), row["password_hash"]) or not totp.verify(row["totp_secret"], str(data.get("code", ""))):
+                    raise APIError("كلمة المرور أو الرمز غير صحيح.", 403)
+                conn.execute("UPDATE admins SET totp_secret='',updated_at=? WHERE username=?", (now_iso(), session["username"]))
+            self.send_json({"ok": True}); return
         if path == "/api/admin/password" and self.command == "POST":
             session = self.require_admin(write=True)
             if not session: return
@@ -819,14 +1107,14 @@ class StoreHandler(BaseHTTPRequestHandler):
             # Public order creation is the only unauthenticated write route.
             if parsed_path == "/api/orders" and self.command == "POST":
                 try: self.create_order()
-                except APIError as exc: self.send_json({"error": exc.message}, exc.status)
+                except APIError as exc: self.send_json({"error": exc.message, **exc.extra}, exc.status, exc.headers)
                 return
             try: self.route_mutation()
-            except APIError as exc: self.send_json({"error": exc.message}, exc.status)
+            except APIError as exc: self.send_json({"error": exc.message, **exc.extra}, exc.status, exc.headers)
             return
         if self.command == "PATCH":
             try: self.route_patch()
-            except APIError as exc: self.send_json({"error": exc.message}, exc.status)
+            except APIError as exc: self.send_json({"error": exc.message, **exc.extra}, exc.status, exc.headers)
             return
         self.route_read_only()
 
@@ -837,20 +1125,29 @@ class StoreHandler(BaseHTTPRequestHandler):
         if path in ("/api/health", "/api/store", "/api/categories", "/api/products", "/api/admin/me", "/api/admin/dashboard", "/api/admin/products", "/api/admin/categories", "/api/admin/orders", "/api/admin/settings", "/api/admin/export/orders.csv", "/robots.txt", "/sitemap.xml") or path.startswith("/"):
             # The GET/HEAD read router below duplicates the GET route table deliberately.
             try:
-                if path == "/api/health": self.send_json({"ok": True, "service": "fakhama-store", "time": now_iso()}); return
+                if path == "/api/health":
+                    try:
+                        with connect_db() as conn: conn.execute("SELECT 1").fetchone()
+                    except Exception:
+                        self.send_json({"ok": False, "service": "fakhama-store", "version": VERSION, "db": False}, 503); return
+                    self.send_json({"ok": True, "service": "fakhama-store", "version": VERSION, "db": True, "time": now_iso()}); return
                 if path == "/api/store":
                     with connect_db() as conn: settings = get_settings(conn)
-                    self.send_json({"name": settings["store_name"], "tagline": settings["tagline"], "city": settings["city"], "phone": settings["phone"], "whatsapp": settings["whatsapp"], "address": settings["address"], "map_url": settings.get("map_url", ""), "delivery_fee": int(settings.get("delivery_fee", "0") or 0), "delivery_note": settings.get("delivery_note", ""), "site_ready": settings.get("site_ready", "0") == "1", "seo_title": settings.get("seo_title", ""), "seo_description": settings.get("seo_description", ""), "hero_title": settings.get("hero_title", ""), "hero_copy": settings.get("hero_copy", "")}); return
+                    self.send_json({"name": settings["store_name"], "tagline": settings["tagline"], "city": settings["city"], "phone": settings["phone"], "whatsapp": settings["whatsapp"], "address": settings["address"], "map_url": settings.get("map_url", ""), "delivery_fee": int(settings.get("delivery_fee", "0") or 0), "delivery_note": settings.get("delivery_note", ""), "site_ready": settings.get("site_ready", "0") == "1", "seo_title": settings.get("seo_title", ""), "seo_description": settings.get("seo_description", ""), "hero_title": settings.get("hero_title", ""), "hero_copy": settings.get("hero_copy", "")}, revalidate=True); return
                 if path == "/api/categories":
-                    with connect_db() as conn: rows = conn.execute("SELECT slug,name,sort_order FROM categories WHERE active=1 ORDER BY sort_order,name").fetchall()
-                    self.send_json({"categories": [dict(r) for r in rows]}); return
+                    with connect_db() as conn: rows = conn.execute("SELECT slug,name,sort_order,image FROM categories WHERE active=1 ORDER BY sort_order,name").fetchall()
+                    self.send_json({"categories": [{**dict(r), "image": public_image(r["image"])} for r in rows]}, revalidate=True); return
                 if path == "/api/products":
-                    with connect_db() as conn: rows = conn.execute("SELECT p.*,c.name AS category_name FROM products p JOIN categories c ON c.slug=p.category WHERE p.active=1 AND c.active=1 ORDER BY p.featured DESC,p.id DESC").fetchall()
-                    self.send_json({"products": [product_dict(r, r["category_name"]) for r in rows]}); return
+                    with connect_db() as conn:
+                        rows = conn.execute("SELECT p.*,c.name AS category_name FROM products p JOIN categories c ON c.slug=p.category WHERE p.active=1 AND c.active=1 ORDER BY p.featured DESC,p.id DESC").fetchall()
+                        gallery = images_for(conn, [r["id"] for r in rows])
+                    self.send_json({"products": [product_dict(r, r["category_name"], gallery[r["id"]]) for r in rows]}, revalidate=True); return
                 if path == "/api/admin/me":
                     session = self.require_admin()
                     if session:
-                        self.send_json({"authenticated": True, "username": session["username"], "csrf": session["csrf"]})
+                        with connect_db() as conn:
+                            row = conn.execute("SELECT totp_secret FROM admins WHERE username=?", (session["username"],)).fetchone()
+                        self.send_json({"authenticated": True, "username": session["username"], "csrf": session["csrf"], "totp_enabled": bool(row and row["totp_secret"])})
                     return
                 if path == "/api/admin/dashboard":
                     if not self.require_admin(): return
@@ -866,12 +1163,14 @@ class StoreHandler(BaseHTTPRequestHandler):
                     self.send_json({"products": total_products, "active_products": active_products, "pending_orders": pending, "total_orders": total_orders, "delivered_revenue": delivered_revenue, "low_stock": low_stock, "recent_orders": recent}); return
                 if path == "/api/admin/products":
                     if not self.require_admin(): return
-                    with connect_db() as conn: rows = conn.execute("SELECT p.*,c.name AS category_name FROM products p LEFT JOIN categories c ON c.slug=p.category ORDER BY p.id DESC").fetchall()
-                    self.send_json({"products": [product_dict(r, r["category_name"] or "") for r in rows]}); return
+                    with connect_db() as conn:
+                        rows = conn.execute("SELECT p.*,c.name AS category_name FROM products p LEFT JOIN categories c ON c.slug=p.category ORDER BY p.id DESC").fetchall()
+                        gallery = images_for(conn, [r["id"] for r in rows])
+                    self.send_json({"products": [product_dict(r, r["category_name"] or "", gallery[r["id"]]) for r in rows]}); return
                 if path == "/api/admin/categories":
                     if not self.require_admin(): return
-                    with connect_db() as conn: rows = conn.execute("SELECT c.slug,c.name,c.sort_order,c.active,COUNT(p.id) AS product_count FROM categories c LEFT JOIN products p ON p.category=c.slug GROUP BY c.slug ORDER BY c.sort_order,c.name").fetchall()
-                    self.send_json({"categories": [dict(r) for r in rows]}); return
+                    with connect_db() as conn: rows = conn.execute("SELECT c.slug,c.name,c.sort_order,c.active,c.image,COUNT(p.id) AS product_count FROM categories c LEFT JOIN products p ON p.category=c.slug GROUP BY c.slug ORDER BY c.sort_order,c.name").fetchall()
+                    self.send_json({"categories": [{**dict(r), "image": public_image(r["image"])} for r in rows]}); return
                 if path == "/api/admin/orders":
                     if not self.require_admin(): return
                     qs = dict([part.split("=", 1) if "=" in part else (part, "") for part in parsed.query.split("&") if part])
@@ -891,31 +1190,92 @@ class StoreHandler(BaseHTTPRequestHandler):
                     self.export_orders(); return
                 if path in ("/robots.txt", "/sitemap.xml"):
                     # Crawlers are kept out until the owner marks the store data as real and ready (Settings → site_ready).
-                    with connect_db() as conn: ready = get_settings(conn).get("site_ready", "0") == "1"
+                    with connect_db() as conn:
+                        ready = get_settings(conn).get("site_ready", "0") == "1"
+                        rows = conn.execute("SELECT p.slug,p.image,p.updated_at FROM products p JOIN categories c ON c.slug=p.category WHERE p.active=1 AND c.active=1 ORDER BY p.id DESC").fetchall() if ready else []
                     if path == "/robots.txt":
-                        if ready:
-                            text = f"User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /api/\nSitemap: {self.base_url()}/sitemap.xml\n"
-                        else:
-                            text = "User-agent: *\nDisallow: /\n"
-                        self._send(200, text.encode(), "text/plain; charset=utf-8"); return
+                        self._send(200, seo.robots_txt(self.base_url(), ready).encode(), "text/plain; charset=utf-8", {"Cache-Control": "public, max-age=3600"}); return
                     if not ready:
                         self._send(404, b"Not found", "text/plain; charset=utf-8"); return
-                    body = f"<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"><url><loc>{self.base_url()}/</loc><changefreq>daily</changefreq></url></urlset>".encode()
-                    self._send(200, body, "application/xml; charset=utf-8"); return
+                    products = [{"slug": r["slug"], "image": public_image(r["image"]), "updated_at": r["updated_at"]} for r in rows]
+                    self._send(200, seo.sitemap_xml(self.base_url(), products, list(legal.PAGES)).encode(), "application/xml; charset=utf-8", {"Cache-Control": "public, max-age=3600"}); return
                 if path.startswith("/api/"):
                     self.send_json({"error": "المسار غير موجود."}, 404); return
                 if self.command in ("GET", "HEAD"):
                     self.serve_static(path); return
                 self.send_json({"error": "الطريقة غير مدعومة."}, 405)
             except APIError as exc:
-                self.send_json({"error": exc.message}, exc.status)
+                self.send_json({"error": exc.message, **exc.extra}, exc.status, exc.headers)
             return
 
 
+def backup_data(keep: int = 14) -> list[Path]:
+    """Consistent copy of the database (SQLite online-backup API, safe while the server runs) + a tarball of uploads/.
+    Files go to DATA_DIR/backups; only the newest `keep` of each kind are retained."""
+    import tarfile
+    target = DATA_DIR / "backups"
+    target.mkdir(exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    db_copy = target / f"store-{stamp}.db"
+    source = sqlite3.connect(DB_PATH)
+    try:
+        dest = sqlite3.connect(db_copy)
+        with dest:
+            source.backup(dest)
+        dest.close()
+    finally:
+        source.close()
+    tar_path = target / f"uploads-{stamp}.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as tar:
+        tar.add(UPLOAD_DIR, arcname="uploads")
+    for pattern in ("store-*.db", "uploads-*.tar.gz"):
+        for old in sorted(target.glob(pattern))[:-max(1, keep)]:
+            old.unlink(missing_ok=True)
+    return [db_copy, tar_path]
+
+
+def sweep_orphan_uploads(min_age: int = 24 * 3600) -> int:
+    """Remove uploads that no product/category references (abandoned form, cancelled upload) and are older than a day."""
+    removed = 0
+    with connect_db() as conn:
+        used = {row[0] for row in conn.execute("SELECT path FROM product_images UNION SELECT thumb FROM product_images UNION SELECT image FROM products UNION SELECT image FROM categories") if row[0]}
+    used_names = {u.rsplit("/", 1)[-1] for u in used}
+    for file in UPLOAD_DIR.iterdir():
+        if file.is_file() and file.name not in used_names and file.name != ".gitkeep" and time.time() - file.stat().st_mtime > min_age:
+            file.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
+def start_auto_backup(keep: int) -> None:
+    def loop() -> None:
+        while True:
+            try:
+                backup_data(keep)
+                sweep_orphan_uploads()
+            except Exception:
+                traceback.print_exc()
+            time.sleep(24 * 60 * 60)
+    threading.Thread(target=loop, daemon=True, name="auto-backup").start()
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "backup":
+        init_db()
+        for path in backup_data(int(os.environ.get("BACKUP_KEEP", "14"))):
+            print(path)
+        sys.exit(0)
     first_run_password = init_db()
+    try:
+        sweep_orphan_uploads()
+    except Exception:
+        traceback.print_exc()
     server = ThreadingHTTPServer((HOST, PORT), StoreHandler)
     server.daemon_threads = True
+    if os.environ.get("AUTO_BACKUP", "") == "1":
+        start_auto_backup(int(os.environ.get("BACKUP_KEEP", "14")))
+    # SIGTERM (docker stop, systemd) finishes in-flight requests and exits cleanly.
+    signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
     print(f"\nموقع المتجر: http://{HOST}:{PORT}/")
     print(f"لوحة الإدارة: http://{HOST}:{PORT}/admin")
     if first_run_password:

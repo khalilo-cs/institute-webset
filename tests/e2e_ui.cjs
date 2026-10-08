@@ -35,8 +35,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   const browser = await chromium.launch();
   const results = [];
-  const check = (name, fn) => async () => { try { await fn(); results.push(['PASS', name]); } catch (e) { results.push(['FAIL', name + ' — ' + e.message.split('\n')[0]]); } };
+  const check = (name, fn) => async () => { try { await fn(); results.push(['PASS', name]); } catch (e) { results.push(['FAIL', name + ' — ' + e.message.split('\n').slice(0, 3).join(' | ')]); } };
   const errors = [];
+  let newPassword = '';
 
   try {
     // ------------------------------------------------------------ customer storefront (phone)
@@ -93,6 +94,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       await page.fill('#customerName', 'عميل اختبار الواجهة');
       await page.fill('#customerPhone', '0551234567');
       await page.fill('#customerCity', 'جدة');
+      await page.check('#orderForm input[name=consent]');
       await page.screenshot({ path: path.join(SHOTS, '03-order-form-mobile.png') });
       await page.click('#orderForm button[type=submit]');
       await page.waitForFunction(() => /تم تسجيل طلبك MH-\d{6}-\d{5} بنجاح/.test(document.querySelector('#toast').textContent));
@@ -130,10 +132,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     })();
     const png = path.join(dataDir, 'upload-test.png');
     fs.writeFileSync(png, PNG);
-    await check('admin adds a product with an uploaded image, storefront shows it', async () => {
+    const png2 = path.join(dataDir, 'upload-test-2.png');
+    fs.writeFileSync(png2, PNG);
+    await check('admin adds a product with TWO uploaded images, reorders them; the storefront shows the gallery', async () => {
       await ap.click('#addProduct');
       await ap.waitForSelector('#productForm');
-      await ap.setInputFiles('#productImage', png);
+      await ap.setInputFiles('#productImages', [png, png2]);
+      await ap.waitForFunction(() => document.querySelectorAll('#gmList .gm-item').length === 2, null, { timeout: 15000 });
+      await ap.click('#gmList .gm-item:nth-child(2) [data-gm=first]'); // make the second photo the primary one
       await ap.fill('#pName', 'ستارة اختبار الرفع');
       await ap.selectOption('#pCategory', 'roller');
       await ap.fill('#pPrice', '321');
@@ -144,8 +150,66 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       await ap.waitForFunction(() => document.querySelector('#productsBody').textContent.includes('ستارة اختبار الرفع'));
       const res = await (await fetch(base + '/api/products')).json();
       const made = res.products.find(p => p.name === 'ستارة اختبار الرفع');
-      assert.ok(made && /^\/uploads\/[0-9a-f]{32}\.png$/.test(made.image), JSON.stringify(made));
+      assert.ok(made && made.images.length === 2, JSON.stringify(made));
+      assert.ok(/^\/uploads\/[0-9a-f]{32}\.jpg$/.test(made.image), 'client re-encodes to JPEG: ' + made.image);
+      assert.ok(/^\/uploads\/[0-9a-f]{32}\.jpg$/.test(made.thumb));
       assert.strictEqual((await fetch(base + made.image)).status, 200);
+      // the product has its own shareable page with server-rendered meta
+      const html = await (await fetch(base + '/product/' + encodeURIComponent(made.slug))).text();
+      assert.ok(html.includes('og:title') && html.includes('ستارة اختبار الرفع') && html.includes('"Product"'));
+    })();
+    await check('admin bar appears on the storefront for a logged-in admin; product modal has gallery, share and edit', async () => {
+      const sp = await admin.newPage();
+      await sp.goto(base + '/');
+      await sp.waitForSelector('.product-card');
+      await sp.waitForSelector('#adminBar:not([hidden])');
+      assert.ok((await sp.getAttribute('#adminBar a', 'href')).startsWith('/admin/#products/new'));
+      await sp.fill('#searchInput', 'ستارة اختبار الرفع').catch(async () => { await sp.click('#searchToggle'); await sp.fill('#searchInput', 'ستارة اختبار الرفع'); });
+      await sp.locator('.quick-add').first().click({ force: true });
+      await sp.waitForSelector('#productModal.open');
+      assert.strictEqual(await sp.locator('.gthumb').count(), 2);
+      assert.ok(sp.url().includes('/product/'), 'URL follows the open product: ' + sp.url());
+      assert.ok((await sp.title()).includes('ستارة اختبار الرفع'));
+      await sp.click('.gthumb:nth-child(2)');
+      assert.ok((await sp.getAttribute('.gthumb:nth-child(2)', 'aria-pressed')) === 'true');
+      assert.ok(await sp.locator('text=تعديل المنتج').count() === 1, 'admin edit link');
+      assert.ok((await sp.getAttribute('a:has-text("مشاركة عبر واتساب")', 'href')).startsWith('https://wa.me/?text='));
+      await sp.keyboard.press('Escape');
+      await sp.waitForFunction(() => !document.querySelector('#productModal.open'));
+      await sp.waitForFunction(() => location.pathname === '/');
+      // deep link opens the modal directly
+      await sp.goto(base + '/product/wavy-03');
+      await sp.waitForSelector('#productModal.open');
+      assert.ok((await sp.textContent('#productModalTitle')).includes('موديل 3'));
+      await sp.close();
+    })();
+    await check('admin categories: add with image, reorder, edit, delete', async () => {
+      await ap.evaluate(() => navigate('categories'));
+      await ap.waitForSelector('#categoryAddForm');
+      await ap.fill('#newCategoryName', 'قسم اختبار الواجهة');
+      await ap.setInputFiles('#newCategoryImage', png);
+      await ap.click('#categoryAddForm button[type=submit]');
+      await ap.waitForFunction(() => document.querySelector('#categoryGrid').textContent.includes('قسم اختبار الواجهة'));
+      const before = await ap.$$eval('#categoryGrid .category-info b', els => els.map(e => e.textContent));
+      await ap.locator('#categoryGrid .cat-row', { hasText: 'قسم اختبار الواجهة' }).locator('[data-move=up]').click();
+      await ap.waitForFunction((prev) => { const now = [...document.querySelectorAll('#categoryGrid .category-info b')].map(e => e.textContent); return now.join() !== prev.join(); }, before);
+      const hasImage = await ap.locator('#categoryGrid .cat-row', { hasText: 'قسم اختبار الواجهة' }).locator('img').count();
+      assert.strictEqual(hasImage, 1, 'category image shown');
+      await ap.locator('#categoryGrid .cat-row', { hasText: 'قسم اختبار الواجهة' }).locator('[data-edit-category]').click();
+      await ap.fill('#categoryName', 'قسم اختبار معدّل');
+      await ap.click('#categoryForm button[type=submit]');
+      await ap.waitForFunction(() => document.querySelector('#categoryGrid').textContent.includes('قسم اختبار معدّل'));
+      ap.once('dialog', d => d.accept());
+      await ap.locator('#categoryGrid .cat-row', { hasText: 'قسم اختبار معدّل' }).locator('[data-delete-category]').click();
+      await ap.waitForFunction(() => !document.querySelector('#categoryGrid').textContent.includes('قسم اختبار معدّل'));
+      await ap.evaluate(() => navigate('products'));
+      await ap.waitForSelector('#productsBody .thumb');
+    })();
+    await check('deep link /admin/#products/new opens the add-product form after login', async () => {
+      const dl = await admin.newPage();
+      await dl.goto(base + '/admin/#products/new');
+      await dl.waitForSelector('#productForm', { timeout: 15000 });
+      await dl.close();
     })();
     await check('admin hides, edits and deletes a product', async () => {
       const row = ap.locator('#productsBody tr', { hasText: 'ستارة اختبار الرفع' });
@@ -178,13 +242,39 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await check('admin changes the password from the UI (success toast, no JS error)', async () => {
       await ap.evaluate(() => navigate('settings'));
       await ap.waitForSelector('#passwordForm');
-      const newPassword = 'P' + crypto.randomBytes(14).toString('base64url');
+      newPassword = 'P' + crypto.randomBytes(14).toString('base64url');
       await ap.fill('#oldPassword', password);
       await ap.fill('#newPassword', newPassword);
       await ap.fill('#confirmPassword', newPassword);
       await ap.click('#passwordForm button[type=submit]');
       await ap.waitForFunction(() => document.querySelector('#toast').textContent.includes('تم تحديث كلمة المرور بنجاح'));
       assert.strictEqual(await ap.inputValue('#oldPassword'), '', 'form reset after success');
+    })();
+    await check('two-factor: set up with an authenticator code, login then requires the code', async () => {
+      const totp = (secret) => { // independent RFC 6238 implementation
+        const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; let bits = '';
+        for (const ch of secret.replace(/\s+/g, '').toUpperCase()) bits += alphabet.indexOf(ch).toString(2).padStart(5, '0');
+        const key = Buffer.from(bits.match(/.{8}/g).map(b => parseInt(b, 2)));
+        const counter = Buffer.alloc(8); counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30000)));
+        const h = crypto.createHmac('sha1', key).update(counter).digest(); const o = h[h.length - 1] & 15;
+        return String((h.readUInt32BE(o) & 0x7fffffff) % 1000000).padStart(6, '0');
+      };
+      await ap.evaluate(() => navigate('settings'));
+      await ap.waitForSelector('#tfStart');
+      await ap.click('#tfStart');
+      await ap.waitForSelector('#tfEnable');
+      const secret = (await ap.textContent('code')).replace(/\s+/g, '');
+      await ap.fill('#tfCode', totp(secret));
+      await ap.click('#tfEnable');
+      await ap.waitForSelector('#tfDisable');
+      await ap.click('#menuButton'); await ap.click('#logoutBtn');
+      await ap.waitForSelector('#loginScreen:not(.hidden)');
+      await ap.fill('#loginUser', 'admin'); await ap.fill('#loginPass', newPassword);
+      await ap.click('#loginForm button[type=submit]');
+      await ap.waitForSelector('#codeField:not(.hidden)');
+      await ap.fill('#loginCode', totp(secret));
+      await ap.click('#loginForm button[type=submit]');
+      await ap.waitForSelector('#appShell:not(.hidden)'); // lands on the page named in the URL hash (#settings)
     })();
     await check('admin logout returns to the login screen', async () => {
       await ap.click('#menuButton'); // the sidebar (with the logout button) is a drawer on phones

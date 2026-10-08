@@ -321,7 +321,7 @@ class AdminTests(ServerCase):
         status, made, _ = self.json("POST", "/api/admin/products", {"name": "ستارة بسعر ثابت", "category": "curtains", "price": 300, "stock": 5, "image": "/assets/wavy-02.jpg"}, **kw)
         self.assertEqual(status, 201, made)
         priced = made["product"]
-        status, order, _ = self.json("POST", "/api/orders", {"name": "عميل اختبار", "phone": "0551234567", "city": "جدة",
+        status, order, _ = self.json("POST", "/api/orders", {"name": "عميل اختبار", "phone": "0551234567", "city": "جدة", "consent": True,
                                                              "items": [{"product_id": pid, "quantity": 2}, {"product_id": priced["id"], "quantity": 1}]})
         self.assertEqual(status, 201, order)
         self.assertEqual(order["subtotal"], priced["price"])
@@ -404,7 +404,7 @@ class OrderTests(ServerCase):
         return next(p["stock"] for p in self.json("GET", "/api/products")[1]["products"] if p["id"] == product_id)
 
     def order(self, items, **fields):
-        body = {"name": "عميل اختبار", "phone": "0551234567", "city": "جدة", "note": "ملاحظة", "items": items, **fields}
+        body = {"name": "عميل اختبار", "phone": "0551234567", "city": "جدة", "consent": True, "note": "ملاحظة", "items": items, **fields}
         return self.json("POST", "/api/orders", body)
 
     def test_order_flow_totals_stock_and_cancel(self):
@@ -477,6 +477,8 @@ class RateLimitTests(ServerCase):
             self.assertEqual(self.json("POST", "/api/admin/login", {"username": "admin", "password": "nope-nope-nope"})[0], 401)
         self.assertEqual(self.json("POST", "/api/admin/login", {"username": "admin", "password": "nope-nope-nope"})[0], 429)
         self.assertEqual(self.json("POST", "/api/admin/login", {"username": "admin", "password": self.admin_password})[0], 429)
+        _, _, resp = self.json("POST", "/api/admin/login", {"username": "admin", "password": "nope-nope-nope"})
+        self.assertEqual(resp.getheader("Retry-After"), "300")
 
 
 class OrderRateLimitTests(ServerCase):
@@ -484,7 +486,7 @@ class OrderRateLimitTests(ServerCase):
         p = next(p for p in self.json("GET", "/api/products")[1]["products"] if p["stock"] >= 20)
         codes = []
         for _ in range(12):
-            codes.append(self.json("POST", "/api/orders", {"name": "عميل", "phone": "0551234567", "city": "جدة",
+            codes.append(self.json("POST", "/api/orders", {"name": "عميل", "phone": "0551234567", "city": "جدة", "consent": True,
                                                            "items": [{"product_id": p["id"], "quantity": 1}]})[0])
         self.assertEqual(codes[:10], [201] * 10)
         self.assertEqual(codes[10:], [429, 429])
@@ -648,6 +650,312 @@ class CatalogueSeedOnceTests(unittest.TestCase):
             conn.close()
         finally:
             shutil.rmtree(data_dir, ignore_errors=True)
+
+
+def totp_now(secret: str, at: float | None = None) -> str:
+    """Independent RFC 6238 implementation used to check the server's one."""
+    import hashlib, hmac, struct
+    key = base64.b32decode(secret + "=" * (-len(secret) % 8), casefold=True)
+    digest = hmac.new(key, struct.pack(">Q", int((time.time() if at is None else at) // 30)), hashlib.sha1).digest()
+    off = digest[-1] & 0x0F
+    return f"{(struct.unpack('>I', digest[off:off + 4])[0] & 0x7FFFFFFF) % 1000000:06d}"
+
+
+class GalleryAndCategoryTests(ServerCase):
+    def upload(self, kw, raw=PNG, mime="image/png", thumb=True):
+        body = {"data": data_uri(mime, raw)}
+        if thumb:
+            body["thumb"] = data_uri("image/jpeg", JPEG)
+        status, data, _ = self.json("POST", "/api/admin/upload", body, **kw)
+        self.assertEqual(status, 201, data)
+        return data
+
+    def test_upload_endpoint_validates_and_requires_admin(self):
+        self.assertEqual(self.json("POST", "/api/admin/upload", {"data": data_uri("image/png", PNG)})[0], 401)
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        self.assertEqual(self.json("POST", "/api/admin/upload", {"data": "nope"}, **kw)[0], 400)
+        self.assertEqual(self.json("POST", "/api/admin/upload", {"data": data_uri("image/png", JPEG)}, **kw)[0], 400)
+        up = self.upload(kw)
+        self.assertRegex(up["url"], r"^/uploads/[0-9a-f]{32}\.png$")
+        self.assertRegex(up["thumb"], r"^/uploads/[0-9a-f]{32}\.jpg$")
+        self.assertEqual(self.req("GET", up["url"])[0], 200)
+        # bodies above the limit are refused before being read into memory
+        huge = b'{"data":"' + b"A" * (10 * 1024 * 1024) + b'"}'
+        try:
+            self.assertEqual(self.req("POST", "/api/admin/upload", huge, cookie=cookie, csrf=csrf)[0], 413)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the server refused the body and closed the connection before it was fully sent
+
+    def test_product_gallery_order_primary_and_cleanup(self):
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        a, b, c = self.upload(kw), self.upload(kw), self.upload(kw)
+        base = {"name": "منتج معرض صور", "category": "curtains", "price": 100, "stock": 3, "description": "وصف"}
+        status, data, _ = self.json("POST", "/api/admin/products", {**base, "images": [a, b, c]}, **kw)
+        self.assertEqual(status, 201, data)
+        product = data["product"]
+        self.assertEqual([i["url"] for i in product["images"]], [a["url"], b["url"], c["url"]])
+        self.assertEqual(product["image"], a["url"])
+        self.assertEqual(product["thumb"], a["thumb"])
+        # Reorder (c first) and drop b: b's files are deleted from disk, a and c are kept.
+        status, data, _ = self.json("PUT", f"/api/admin/products/{product['id']}", {**base, "images": [c, a]}, **kw)
+        self.assertEqual(status, 200, data)
+        self.assertEqual([i["url"] for i in data["product"]["images"]], [c["url"], a["url"]])
+        self.assertEqual(data["product"]["image"], c["url"])
+        self.assertEqual(self.req("GET", b["url"])[0], 404, "removed upload is deleted")
+        self.assertEqual(self.req("GET", b["thumb"])[0], 404)
+        self.assertEqual(self.req("GET", a["url"])[0], 200)
+        # Public API exposes the gallery in order.
+        listed = next(p for p in self.json("GET", "/api/products")[1]["products"] if p["id"] == product["id"])
+        self.assertEqual([i["url"] for i in listed["images"]], [c["url"], a["url"]])
+        # Forged paths never enter the gallery; an empty gallery is refused; the limit is enforced.
+        status, data, _ = self.json("PUT", f"/api/admin/products/{product['id']}", {**base, "images": ["/assets/../store.db", "/uploads/does-not-exist.png", c["url"]]}, **kw)
+        self.assertEqual([i["url"] for i in data["product"]["images"]], [c["url"]])
+        self.assertEqual(self.json("PUT", f"/api/admin/products/{product['id']}", {**base, "images": []}, **kw)[0], 400)
+        many = [self.upload(kw, thumb=False) for _ in range(13)]
+        self.assertEqual(self.json("PUT", f"/api/admin/products/{product['id']}", {**base, "images": many}, **kw)[0], 400)
+        # Deleting the product deletes its uploads.
+        self.assertEqual(self.json("DELETE", f"/api/admin/products/{product['id']}", **kw)[0], 200)
+        self.assertEqual(self.req("GET", c["url"])[0], 404)
+        for m in many:
+            self.req("GET", m["url"])
+
+    def test_category_image_and_reorder(self):
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        img = self.upload(kw, thumb=False)
+        status, data, _ = self.json("POST", "/api/admin/categories", {"name": "قسم بصورة", "image": img["url"]}, **kw)
+        self.assertEqual((status, data["image"]), (201, img["url"]), data)
+        slug = data["slug"]
+        pub = {c["slug"]: c for c in self.json("GET", "/api/categories")[1]["categories"]}
+        self.assertEqual(pub[slug]["image"], img["url"])
+        # Reorder: reverse the current list.
+        current = [c["slug"] for c in self.json("GET", "/api/admin/categories", **kw)[1]["categories"]]
+        self.assertEqual(self.json("POST", "/api/admin/categories/reorder", {"order": list(reversed(current))}, **kw)[0], 200)
+        self.assertEqual([c["slug"] for c in self.json("GET", "/api/admin/categories", **kw)[1]["categories"]], list(reversed(current)))
+        self.assertEqual(self.json("POST", "/api/admin/categories/reorder", {"order": current[:-1]}, **kw)[0], 409, "must list every category")
+        self.assertEqual(self.json("POST", "/api/admin/categories/reorder", {"order": "x"}, **kw)[0], 400)
+        # Replacing and removing the image.
+        from urllib.parse import quote
+        url = f"/api/admin/categories/{quote(slug)}"
+        img2 = self.upload(kw, thumb=False)
+        status, data, _ = self.json("PUT", url, {"name": "قسم بصورة", "image": img2["url"]}, **kw)
+        self.assertEqual(data["image"], img2["url"])
+        self.assertEqual(self.req("GET", img["url"])[0], 404, "replaced image is deleted")
+        status, data, _ = self.json("PUT", url, {"name": "قسم بصورة", "remove_image": True}, **kw)
+        self.assertEqual(data["image"], "")
+        self.assertEqual(self.req("GET", img2["url"])[0], 404)
+        self.json("DELETE", url, **kw)
+
+
+class StandardsTests(ServerCase):
+    def test_csp_uses_nonces_and_no_unsafe_inline_scripts(self):
+        for path in ("/", "/admin/", "/privacy", "/offline.html", "/product/wavy-03"):
+            status, resp, body = self.req("GET", path)
+            self.assertEqual(status, 200, path)
+            csp = resp.getheader("Content-Security-Policy")
+            nonce = re.search(r"script-src 'self' 'nonce-([^']+)'", csp).group(1)
+            self.assertNotIn("'unsafe-inline'", csp.split("style-src-attr")[0], path)
+            text = body.decode()
+            for tag in re.findall(r"<(?:script|style)\b[^>]*>", text):
+                if "ld+json" in tag:
+                    continue
+                self.assertIn(f'nonce="{nonce}"', tag, (path, tag))
+            self.assertIsNone(re.search(r"\son[a-z]+=", text), f"inline event handler in {path}")
+        # a new nonce per response
+        n1 = re.search(r"nonce-([^']+)", self.req("GET", "/")[1].getheader("Content-Security-Policy")).group(1)
+        n2 = re.search(r"nonce-([^']+)", self.req("GET", "/")[1].getheader("Content-Security-Policy")).group(1)
+        self.assertNotEqual(n1, n2)
+
+    def test_compression_etag_and_conditional_requests(self):
+        status, resp, body = self.req("GET", "/api/products", headers={"Accept-Encoding": "gzip"})
+        self.assertEqual(resp.getheader("Content-Encoding"), "gzip")
+        import gzip as gz
+        self.assertEqual(len(json.loads(gz.decompress(body))["products"]), 18)
+        self.assertLess(len(body), 8000, "catalogue JSON is compressed")
+        etag = resp.getheader("ETag")
+        self.assertTrue(etag)
+        self.assertEqual(resp.getheader("Vary"), "Accept-Encoding")
+        status, resp2, body2 = self.req("GET", "/api/products", headers={"If-None-Match": etag, "Accept-Encoding": "gzip"})
+        self.assertEqual((status, body2), (304, b""))
+        status, resp, body = self.req("GET", "/assets/wavy-01.jpg")
+        self.assertIn("max-age", resp.getheader("Cache-Control"))
+        asset_etag = resp.getheader("ETag")
+        self.assertEqual(self.req("GET", "/assets/wavy-01.jpg", headers={"If-None-Match": asset_etag})[0], 304)
+        _, resp, _ = self.req("GET", "/api/admin/me")
+        self.assertEqual(resp.getheader("Cache-Control"), "no-store")
+        self.assertEqual(self.req("GET", "/")[1].getheader("Cache-Control"), "no-cache")
+        self.assertEqual(resp.getheader("Cross-Origin-Opener-Policy"), "same-origin")
+        self.assertTrue(resp.getheader("X-Request-ID"))
+
+    def test_health_reports_database_and_version(self):
+        status, data, _ = self.json("GET", "/api/health")
+        self.assertEqual((status, data["ok"], data["db"]), (200, True, True))
+        self.assertRegex(data["version"], r"^\d+\.\d+\.\d+$")
+
+    def test_product_page_has_server_rendered_seo_and_structured_data(self):
+        status, resp, body = self.req("GET", "/product/wavy-03", headers={"Host": "shop.example.org"})
+        self.assertEqual(status, 200)
+        page = body.decode()
+        self.assertIn("<title>ستائر ويفي تفصيل حسب الطلب — موديل 3 |", page)
+        self.assertIn('property="og:type" content="product"', page)
+        self.assertIn('property="og:image" content="http://shop.example.org/assets/wavy-03.jpg"', page)
+        self.assertIn('name="twitter:card"', page)
+        self.assertIn('content="noindex,nofollow"', page, "stays noindex until the owner marks the store ready")
+        blocks = [json.loads(b) for b in re.findall(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', page, re.S)]
+        types = [b["@type"] for b in blocks]
+        self.assertIn("Product", types)
+        self.assertIn("BreadcrumbList", types)
+        product = next(b for b in blocks if b["@type"] == "Product")
+        self.assertNotIn("offers", product, "price on request: no invented price")
+        self.assertEqual(product["sku"], "FAL-WAV-003")
+        # unknown product -> 404 + noindex, still a usable storefront
+        status, resp, body = self.req("GET", "/product/does-not-exist")
+        self.assertEqual(status, 404)
+        self.assertIn(b'content="noindex,nofollow"', body)
+        # a priced product publishes an Offer
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        status, made, _ = self.json("POST", "/api/admin/products", {"name": "ستارة بسعر", "category": "curtains", "price": 350, "stock": 4, "image": "/assets/wavy-04.jpg", "description": "<b>x</b> & y"}, **kw)
+        slug = made["product"]["slug"]
+        from urllib.parse import quote
+        _, _, body = self.req("GET", "/product/" + quote(slug))
+        offer = next(json.loads(b) for b in re.findall(r'<script[^>]*ld\+json[^>]*>(.*?)</script>', body.decode(), re.S) if '"Product"' in b)["offers"]
+        self.assertEqual((offer["price"], offer["priceCurrency"], offer["availability"]), ("350", "SAR", "https://schema.org/InStock"))
+        self.assertNotIn("<b>x</b>", body.decode(), "descriptions are escaped in meta tags")
+        self.json("DELETE", f"/api/admin/products/{made['product']['id']}", **kw)
+
+    def test_sitemap_lists_products_only_when_ready(self):
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        self.json("PUT", "/api/admin/settings", {"site_ready": True}, **kw)
+        try:
+            status, resp, body = self.req("GET", "/sitemap.xml", headers={"Host": "shop.example.org"})
+            self.assertEqual(status, 200)
+            text = body.decode()
+            self.assertEqual(text.count("<url>"), 1 + 2 + 18)
+            self.assertIn("<loc>http://shop.example.org/product/wavy-01</loc>", text)
+            self.assertIn("<image:loc>http://shop.example.org/assets/wavy-01.jpg</image:loc>", text)
+            self.assertIn("/privacy", text)
+            _, _, page = self.req("GET", "/", headers={"Host": "shop.example.org"})
+            self.assertIn(b'rel="canonical" href="http://shop.example.org/"', page)
+            self.assertIn(b'content="index,follow,max-image-preview:large"', page)
+            self.assertIn(b'hreflang="ar-SA"', page)
+            self.assertIn(b'rel="preload" as="image"', page)
+        finally:
+            self.json("PUT", "/api/admin/settings", {"site_ready": False}, **kw)
+
+    def test_legal_pages(self):
+        for path, title in (("/privacy", "سياسة الخصوصية"), ("/terms", "الشروط والأحكام")):
+            status, resp, body = self.req("GET", path)
+            self.assertEqual(status, 200)
+            self.assertIn(title, body.decode())
+            self.assertIn("+966 57 648 6491", body.decode(), "contact details come from the store settings")
+            self.assertIn('lang="ar"', body.decode())
+
+    def test_order_requires_consent_and_is_idempotent(self):
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        status, made, _ = self.json("POST", "/api/admin/products", {"name": "منتج للطلب", "category": "curtains", "price": 100, "stock": 10, "image": "/assets/wavy-05.jpg"}, **kw)
+        pid = made["product"]["id"]
+        order = {"name": "عميل", "phone": "0551234567", "city": "جدة", "items": [{"product_id": pid, "quantity": 1}]}
+        status, data, _ = self.json("POST", "/api/orders", order)
+        self.assertEqual(status, 400)
+        self.assertIn("الخصوصية", data["error"])
+        status, data, _ = self.json("POST", "/api/orders", {**order, "consent": "yes"})
+        self.assertEqual(status, 400, "consent must be the boolean true")
+        key = "retry-key-" + secrets.token_hex(6)
+        status, first, _ = self.json("POST", "/api/orders", {**order, "consent": True}, headers={"Idempotency-Key": key})
+        self.assertEqual(status, 201)
+        status, again, resp = self.json("POST", "/api/orders", {**order, "consent": True}, headers={"Idempotency-Key": key})
+        self.assertEqual(status, 200)
+        self.assertEqual(again["order_number"], first["order_number"])
+        self.assertEqual(resp.getheader("Idempotent-Replayed"), "true")
+        stock = next(p["stock"] for p in self.json("GET", "/api/products")[1]["products"] if p["id"] == pid)
+        self.assertEqual(stock, 9, "the retry did not take a second unit")
+        self.assertEqual(self.json("POST", "/api/orders", {**order, "consent": True}, headers={"Idempotency-Key": "short"})[0], 400)
+        self.json("DELETE", f"/api/admin/products/{pid}", **kw)
+
+
+class TwoFactorTests(ServerCase):
+    def test_totp_matches_rfc_6238_vectors(self):
+        sys.path.insert(0, str(ROOT))
+        import totp
+        secret = base64.b32encode(b"12345678901234567890").decode().rstrip("=")  # RFC 6238 SHA-1 test key
+        for at, expected in ((59, "287082"), (1111111109, "081804"), (1111111111, "050471"), (1234567890, "005924"), (2000000000, "279037")):
+            self.assertEqual(totp.code_at(secret, at), expected)
+            self.assertTrue(totp.verify(secret, expected, at))
+        self.assertFalse(totp.verify(secret, "000000", 59))
+        self.assertFalse(totp.verify(secret, "", 59))
+
+    def test_two_factor_login_flow(self):
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        self.assertFalse(self.json("GET", "/api/admin/me", cookie=cookie)[1]["totp_enabled"])
+        self.assertEqual(self.json("POST", "/api/admin/2fa/enable", {"code": "123456"}, **kw)[0], 409, "setup first")
+        status, setup, _ = self.json("POST", "/api/admin/2fa/setup", {}, **kw)
+        self.assertEqual(status, 200)
+        self.assertTrue(setup["otpauth"].startswith("otpauth://totp/"))
+        self.assertEqual(self.json("POST", "/api/admin/2fa/enable", {"code": "000000"}, **kw)[0], 400)
+        self.assertEqual(self.json("POST", "/api/admin/2fa/enable", {"code": totp_now(setup["secret"])}, **kw)[0], 200)
+        self.assertTrue(self.json("GET", "/api/admin/me", cookie=cookie)[1]["totp_enabled"])
+        # Password alone no longer logs in.
+        status, data, _ = self.json("POST", "/api/admin/login", {"username": "admin", "password": self.admin_password})
+        self.assertEqual((status, data.get("need_code")), (401, True))
+        status, data, _ = self.json("POST", "/api/admin/login", {"username": "admin", "password": self.admin_password, "code": "000000"})
+        self.assertEqual((status, data.get("need_code")), (401, True))
+        status, data, resp = self.json("POST", "/api/admin/login", {"username": "admin", "password": self.admin_password, "code": totp_now(setup["secret"])})
+        self.assertEqual(status, 200, data)
+        cookies = [v for k, v in resp.getheaders() if k.lower() == "set-cookie"]
+        self.assertTrue(any(c.startswith("fakhama_admin=") and "HttpOnly" in c for c in cookies))
+        self.assertTrue(any(c.startswith("fakhama_admin_flag=1") and "HttpOnly" not in c for c in cookies), "readable marker cookie for the storefront admin bar")
+        new_cookie = cookies[0].split(";")[0]
+        # Disable needs the password and a valid code.
+        kw2 = dict(cookie=new_cookie, csrf=data["csrf"])
+        self.assertEqual(self.json("POST", "/api/admin/2fa/disable", {"password": "wrong", "code": totp_now(setup["secret"])}, **kw2)[0], 403)
+        self.assertEqual(self.json("POST", "/api/admin/2fa/disable", {"password": self.admin_password, "code": totp_now(setup["secret"])}, **kw2)[0], 200)
+        self.assertEqual(self.json("POST", "/api/admin/login", {"username": "admin", "password": self.admin_password})[0], 200)
+
+
+class BackupTests(unittest.TestCase):
+    def test_backup_command_creates_consistent_copies_and_prunes(self):
+        import sqlite3
+        data_dir = tempfile.mkdtemp(prefix="fakhama-test-")
+        try:
+            env = {**os.environ, "DATA_DIR": data_dir, "ADMIN_PASSWORD": "Z" + secrets.token_urlsafe(16), "BACKUP_KEEP": "2"}
+            (Path(data_dir) / "uploads").mkdir(exist_ok=True)
+            (Path(data_dir) / "uploads" / "x.png").write_bytes(PNG)
+            for _ in range(3):
+                out = subprocess.run([sys.executable, "-I", str(ROOT / "app.py"), "backup"], capture_output=True, text=True, env=env, timeout=60)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                time.sleep(1.1)
+            backups = sorted((Path(data_dir) / "backups").glob("store-*.db"))
+            self.assertEqual(len(backups), 2, "only the newest BACKUP_KEEP are kept")
+            self.assertEqual(sqlite3.connect(backups[-1]).execute("SELECT COUNT(*) FROM products").fetchone()[0], 18)
+            self.assertEqual(sqlite3.connect(backups[-1]).execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(len(list((Path(data_dir) / "backups").glob("uploads-*.tar.gz"))), 2)
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
+
+
+class SeoUnitTests(unittest.TestCase):
+    def test_json_ld_cannot_break_out_of_the_script_tag(self):
+        sys.path.insert(0, str(ROOT))
+        import seo
+        text = seo.jsonld({"name": "</script><script>alert(1)</script>", "x": "<!--"})
+        self.assertNotIn("<", text)
+        self.assertEqual(json.loads(text)["name"], "</script><script>alert(1)</script>")
+
+    def test_meta_values_are_escaped(self):
+        sys.path.insert(0, str(ROOT))
+        import seo
+        template = (ROOT / "index.html").read_text(encoding="utf-8")
+        out = seo.render_page(template, title='A "quoted" <b>', description="x' onerror='y", robots="noindex", canonical="", og_url="",
+                              og_image="", og_type="website", schemas=[{"@type": "Store"}], site_name="S")
+        self.assertIn("&lt;b&gt;", out)
+        self.assertIn("&quot;quoted&quot;", out)
+        self.assertNotIn("onerror='y", out.split("</head>")[0].replace("&#x27;", ""))
 
 
 class LegacyDataMigrationTests(unittest.TestCase):

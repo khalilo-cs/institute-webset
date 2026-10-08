@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Test builds only: allows http to a server on localhost / the emulator host / the local network.
+     ServerOrigin still refuses http for anything that is not a local address. Never shipped in release. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

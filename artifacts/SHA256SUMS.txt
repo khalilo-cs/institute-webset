@@ -1,0 +1,2 @@
+d8c8ecaab93f13d20bfaa38aef314f6fccdf2e75238eb1eec6b75193d94da604  alfakhamah-customer-TEST.apk
+81f415c81c6dfa687a24de6db195aabd1ca78726c18cbd22203a41efc39595aa  alfakhamah-admin-TEST.apk

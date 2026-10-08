@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="ok">حسنًا</string>
+    <string name="cancel">إلغاء</string>
+    <string name="retry">إعادة المحاولة</string>
+
+    <string name="err_offline_title">تعذّر الاتصال بالخادم</string>
+    <string name="err_offline_message">تحقّق من اتصالك بالإنترنت ثم أعد المحاولة.</string>
+    <string name="err_server_title">الخادم غير متاح مؤقتًا</string>
+    <string name="err_server_message">حدثت مشكلة في الخادم. حاول مرة أخرى بعد قليل.</string>
+    <string name="err_ssl_title">تعذّر التحقق من أمان الاتصال</string>
+    <string name="err_ssl_message">شهادة الأمان للخادم غير صالحة، لذلك أوقف التطبيق الاتصال حمايةً لبياناتك. أعد المحاولة لاحقًا أو تواصل مع مسؤول النظام.</string>
+    <string name="err_render_title">توقفت الصفحة عن العمل</string>
+    <string name="err_render_message">أعد تحميل الصفحة للمتابعة.</string>
+    <string name="err_not_configured_title">التطبيق غير مهيأ</string>
+    <string name="err_not_configured_message">لم يُضبط عنوان الخادم لهذا الإصدار. ثبّت الإصدار الرسمي من المتجر أو تواصل مع المطوّر.</string>
+
+    <string name="link_blocked">تعذّر فتح هذا الرابط</string>
+    <string name="no_app_for_link">لا يوجد تطبيق يفتح هذا الرابط</string>
+    <string name="no_file_picker">لا يوجد تطبيق لاختيار الملفات على هذا الجهاز</string>
+    <string name="download_started">بدأ تنزيل الملف</string>
+    <string name="download_failed">تعذّر بدء التنزيل</string>
+
+    <!-- Test (debug) builds only -->
+    <string name="test_banner">نسخة تجريبية — الخادم: %1$s</string>
+    <string name="err_no_server_title">لم يُحدَّد خادم</string>
+    <string name="err_no_server_message_debug">هذه نسخة تجريبية؛ أدخل عنوان خادم المتجر لتجربتها.</string>
+    <string name="change_server">تغيير عنوان الخادم</string>
+    <string name="server_prompt_title">عنوان الخادم (نسخة تجريبية)</string>
+    <string name="server_prompt_message">أدخل عنوان خادم المتجر بصيغة HTTPS. للاختبار على شبكتك المحلية فقط يُقبل http مع عنوان محلي مثل http://192.168.1.10:4173</string>
+    <string name="server_prompt_hint">https://…</string>
+    <string name="server_prompt_save">حفظ وفتح</string>
+    <string name="err_origin_malformed">العنوان غير صالح.</string>
+    <string name="err_origin_not_https">يجب أن يبدأ العنوان بـ https:// (يُسمح بـ http للعناوين المحلية فقط).</string>
+    <string name="err_origin_has_path">أدخل العنوان فقط دون مسار أو معاملات.</string>
+    <string name="err_origin_credentials">لا تضع اسم مستخدم أو كلمة مرور داخل العنوان.</string>
+</resources>

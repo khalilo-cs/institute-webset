@@ -130,14 +130,14 @@ class PublicAndStaticTests(ServerCase):
         _, cats, _ = self.json("GET", "/api/categories")
         self.assertEqual(len(cats["categories"]), 5)
         _, prods, _ = self.json("GET", "/api/products")
-        self.assertEqual(len(prods["products"]), 8)
+        self.assertEqual(len(prods["products"]), 18)  # the owner's 18 curtain photos; no invented sample products
         for p in prods["products"]:
             self.assertTrue(p["image"].startswith("/"), f"image must be root-relative: {p['image']}")
             status, _, _ = self.req("GET", p["image"])
             self.assertEqual(status, 200, p["image"])
 
     def test_pages_and_assets(self):
-        for path in ("/", "/index.html", "/admin", "/admin/", "/assets/hero-curtains.jpg"):
+        for path in ("/", "/index.html", "/admin", "/admin/", "/assets/wavy-11.jpg"):
             status, resp, _ = self.req("GET", path)
             self.assertEqual(status, 200, path)
         status, resp, body = self.req("GET", "/")
@@ -284,7 +284,7 @@ class AdminTests(ServerCase):
             created.append(data["product"])
         product = created[0]
         # Invalid fields.
-        for patch in ({"price": 0}, {"price": "abc"}, {"price": -5}, {"stock": -1}, {"name": "x"}, {"category": "nope"}, {"category": ""}):
+        for patch in ({"price": "abc"}, {"price": -5}, {"stock": -1}, {"name": "x"}, {"category": "nope"}, {"category": ""}):
             status, data, _ = self.json("PUT", f"/api/admin/products/{product['id']}", {**base, "image": product["image"], **patch}, **kw)
             self.assertEqual(status, 400, (patch, data))
         # Update keeps the existing image; a path outside assets/uploads is ignored, not stored.
@@ -294,20 +294,44 @@ class AdminTests(ServerCase):
         self.assertEqual(data["product"]["image"], product["image"])
         self.assertEqual((data["product"]["name"], data["product"]["price"]), ("اسم جديد", 200))
         # Switching to a bundled asset (with or without the leading slash) works.
-        for image in ("/assets/fabrics.jpg", "assets/fabrics.jpg"):
+        for image in ("/assets/wavy-02.jpg", "assets/wavy-02.jpg"):
             status, data, _ = self.json("PUT", f"/api/admin/products/{product['id']}", {**base, "image": image}, **kw)
-            self.assertEqual((status, data["product"]["image"]), (200, "/assets/fabrics.jpg"))
+            self.assertEqual((status, data["product"]["image"]), (200, "/assets/wavy-02.jpg"))
         # Hidden products disappear from the storefront and reappear when activated.
-        self.json("PUT", f"/api/admin/products/{product['id']}", {**base, "image": "/assets/fabrics.jpg", "active": False}, **kw)
+        self.json("PUT", f"/api/admin/products/{product['id']}", {**base, "image": "/assets/wavy-02.jpg", "active": False}, **kw)
         ids = [p["id"] for p in self.json("GET", "/api/products")[1]["products"]]
         self.assertNotIn(product["id"], ids)
-        self.json("PUT", f"/api/admin/products/{product['id']}", {**base, "image": "/assets/fabrics.jpg", "active": True}, **kw)
+        self.json("PUT", f"/api/admin/products/{product['id']}", {**base, "image": "/assets/wavy-02.jpg", "active": True}, **kw)
         ids = [p["id"] for p in self.json("GET", "/api/products")[1]["products"]]
         self.assertIn(product["id"], ids)
         # Delete.
         for p in created:
             self.assertEqual(self.json("DELETE", f"/api/admin/products/{p['id']}", **kw)[0], 200)
         self.assertEqual(self.json("DELETE", f"/api/admin/products/{created[0]['id']}", **kw)[0], 404)
+
+    def test_price_zero_means_price_on_request(self):
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        body = {"name": "ستارة حسب الطلب", "category": "curtains", "price": 0, "stock": 5, "image": "/assets/wavy-01.jpg"}
+        status, data, _ = self.json("POST", "/api/admin/products", body, **kw)
+        self.assertEqual((status, data["product"]["price"]), (201, 0), data)
+        pid = data["product"]["id"]
+        # An order that mixes a priced and a price-on-request line: the server totals only the priced one and flags the order.
+        status, made, _ = self.json("POST", "/api/admin/products", {"name": "ستارة بسعر ثابت", "category": "curtains", "price": 300, "stock": 5, "image": "/assets/wavy-02.jpg"}, **kw)
+        self.assertEqual(status, 201, made)
+        priced = made["product"]
+        status, order, _ = self.json("POST", "/api/orders", {"name": "عميل اختبار", "phone": "0551234567", "city": "جدة",
+                                                             "items": [{"product_id": pid, "quantity": 2}, {"product_id": priced["id"], "quantity": 1}]})
+        self.assertEqual(status, 201, order)
+        self.assertEqual(order["subtotal"], priced["price"])
+        _, orders, _ = self.json("GET", "/api/admin/orders", **kw)
+        mine = next(o for o in orders["orders"] if o["id"] == order["order_id"])
+        self.assertTrue(mine["on_request"])
+        _, dash, _ = self.json("GET", "/api/admin/dashboard", **kw)
+        self.assertTrue(any(o["on_request"] for o in dash["recent_orders"] if o["id"] == order["order_id"]))
+        self.json("PATCH", f"/api/admin/orders/{mine['id']}", {"status": "cancelled"}, **kw)
+        self.json("DELETE", f"/api/admin/products/{pid}", **kw)
+        self.json("DELETE", f"/api/admin/products/{priced['id']}", **kw)
 
     def test_category_lifecycle(self):
         cookie, csrf = self.login()
@@ -324,7 +348,7 @@ class AdminTests(ServerCase):
         self.assertEqual(self.json("PUT", url, {"name": "مجالس", "active": True}, **kw)[0], 200)
         self.assertIn(slug, [c["slug"] for c in self.json("GET", "/api/categories")[1]["categories"]])
         # A category with products cannot be deleted.
-        status, prod, _ = self.json("POST", "/api/admin/products", {"name": "منتج قسم", "category": slug, "price": 10, "stock": 1, "image": "/assets/fabrics.jpg"}, **kw)
+        status, prod, _ = self.json("POST", "/api/admin/products", {"name": "منتج قسم", "category": slug, "price": 10, "stock": 1, "image": "/assets/wavy-02.jpg"}, **kw)
         self.assertEqual(status, 201, prod)
         self.assertEqual(self.json("DELETE", url, **kw)[0], 409)
         self.json("DELETE", f"/api/admin/products/{prod['product']['id']}", **kw)
@@ -367,11 +391,16 @@ class AdminTests(ServerCase):
 class OrderTests(ServerCase):
     ENV = {"ORDER_LIMIT_PER_10MIN": "1000"}  # these tests place many orders; the limiter has its own test below
 
-    def product(self, name_part: str):
-        for p in self.json("GET", "/api/products")[1]["products"]:
-            if name_part in p["name"]:
-                return p
-        raise AssertionError(name_part)
+    def make_product(self, price=250, stock=10, name="ستارة اختبار الطلبات"):
+        cookie, csrf = self.login()
+        status, data, _ = self.json("POST", "/api/admin/products",
+                                    {"name": name, "category": "curtains", "price": price, "stock": stock, "sku": "T-ORDER", "image": "/assets/wavy-03.jpg"},
+                                    cookie=cookie, csrf=csrf)
+        self.assertEqual(status, 201, data)
+        return data["product"]
+
+    def stock_of(self, product_id):
+        return next(p["stock"] for p in self.json("GET", "/api/products")[1]["products"] if p["id"] == product_id)
 
     def order(self, items, **fields):
         body = {"name": "عميل اختبار", "phone": "0551234567", "city": "جدة", "note": "ملاحظة", "items": items, **fields}
@@ -381,22 +410,21 @@ class OrderTests(ServerCase):
         cookie, csrf = self.login()
         kw = dict(cookie=cookie, csrf=csrf)
         self.json("PUT", "/api/admin/settings", {"delivery_fee": 30}, **kw)
-        p = self.product("ستارة رول بلاك أوت")
-        start_stock = p["stock"]
+        p = self.make_product(price=280, stock=15)
         # The client-supplied price/total is ignored; the server prices from the DB.
         status, data, _ = self.order([{"product_id": p["id"], "quantity": 2, "price": 1}], total=1, subtotal=1)
         self.assertEqual(status, 201, data)
-        self.assertEqual((data["subtotal"], data["delivery_fee"], data["total"]), (p["price"] * 2, 30, p["price"] * 2 + 30))
+        self.assertEqual((data["subtotal"], data["delivery_fee"], data["total"]), (560, 30, 590))
         self.assertRegex(data["order_number"], r"^MH-\d{6}-\d{5}$")
-        self.assertEqual(self.product("ستارة رول بلاك أوت")["stock"], start_stock - 2)
+        self.assertEqual(self.stock_of(p["id"]), 13)
         _, orders, _ = self.json("GET", "/api/admin/orders", **kw)
         order = next(o for o in orders["orders"] if o["id"] == data["order_id"])
-        self.assertEqual((order["status"], len(order["items"]), order["items"][0]["quantity"]), ("new", 1, 2))
+        self.assertEqual((order["status"], len(order["items"]), order["items"][0]["quantity"], order["on_request"]), ("new", 1, 2, False))
         # Cancel returns the stock; re-activating takes it again.
         self.assertEqual(self.json("PATCH", f"/api/admin/orders/{order['id']}", {"status": "cancelled"}, **kw)[0], 200)
-        self.assertEqual(self.product("ستارة رول بلاك أوت")["stock"], start_stock)
+        self.assertEqual(self.stock_of(p["id"]), 15)
         self.assertEqual(self.json("PATCH", f"/api/admin/orders/{order['id']}", {"status": "confirmed"}, **kw)[0], 200)
-        self.assertEqual(self.product("ستارة رول بلاك أوت")["stock"], start_stock - 2)
+        self.assertEqual(self.stock_of(p["id"]), 13)
         self.assertEqual(self.json("PATCH", f"/api/admin/orders/{order['id']}", {"status": "bogus"}, **kw)[0], 400)
         # Dashboard + CSV.
         _, dash, _ = self.json("GET", "/api/admin/dashboard", **kw)
@@ -409,7 +437,7 @@ class OrderTests(ServerCase):
         self.json("PUT", "/api/admin/settings", {"delivery_fee": 0}, **kw)
 
     def test_order_validation(self):
-        p = self.product("أقمشة")
+        p = self.make_product(price=95, stock=40)
         self.assertEqual(self.order([{"product_id": p["id"], "quantity": p["stock"] + 1}])[0], 409)
         self.assertEqual(self.order([{"product_id": p["id"], "quantity": 0}])[0], 400)
         self.assertEqual(self.order([{"product_id": p["id"], "quantity": 51}])[0], 400)
@@ -423,10 +451,16 @@ class OrderTests(ServerCase):
         self.assertEqual(self.order([{"product_id": p["id"], "quantity": 1}], city="")[0], 400)
         self.assertEqual(self.req("POST", "/api/orders", b"{not json")[0], 400)
         self.assertEqual(self.req("POST", "/api/orders", b"[1,2]")[0], 400)
-        self.assertEqual(self.product("أقمشة")["stock"], p["stock"], "failed orders must not change stock")
+        self.assertEqual(self.stock_of(p["id"]), 40, "failed orders must not change stock")
+
+    def test_hidden_product_cannot_be_ordered(self):
+        p = self.make_product()
+        cookie, csrf = self.login()
+        self.json("PUT", f"/api/admin/products/{p['id']}", {"name": p["name"], "category": "curtains", "price": 250, "stock": 10, "image": "/assets/wavy-03.jpg", "active": False}, cookie=cookie, csrf=csrf)
+        self.assertEqual(self.order([{"product_id": p["id"], "quantity": 1}])[0], 409)
 
     def test_xss_payload_is_stored_verbatim_and_returned_as_json(self):
-        p = self.product("أقمشة")
+        p = self.make_product()
         payload = "<img src=x onerror=alert(1)>"
         status, data, _ = self.order([{"product_id": p["id"], "quantity": 1}], name=payload + " عميل")
         self.assertEqual(status, 201)
@@ -526,6 +560,93 @@ class FirstRunPasswordTests(ServerCase):
     def test_no_hardcoded_credentials_in_repo_sources(self):
         for name in ("app.py", "README.md", "index.html", "admin.html"):
             self.assertNotIn("Fakhamah#2026Demo!", (ROOT / name).read_text(encoding="utf-8"), name)
+
+
+class CatalogueTests(ServerCase):
+    def test_owner_photos_are_seeded_as_price_on_request_products(self):
+        products = [p for p in self.json("GET", "/api/products")[1]["products"] if p["slug"].startswith("wavy-")]
+        self.assertEqual(len(products), 18)
+        self.assertEqual(sorted(p["slug"] for p in products), [f"wavy-{n:02d}" for n in range(1, 19)])
+        first = self.json("GET", "/api/products")[1]["products"][0]
+        self.assertEqual(first["slug"], "wavy-01", "model 1 is listed first")
+        for p in products:
+            self.assertEqual(p["price"], 0)
+            self.assertEqual(p["category"], "curtains")
+            self.assertTrue(p["alt"] and p["name"].startswith("ستائر ويفي"))
+            self.assertRegex(p["image"], r"^/assets/wavy-\d\d\.jpg$")
+            status, resp, body = self.req("GET", p["image"])
+            self.assertEqual(status, 200, p["image"])
+            self.assertIn("image/jpeg", resp.getheader("Content-Type"))
+
+    def test_photo_files_are_clean_jpegs(self):
+        for n in range(1, 19):
+            data = (ROOT / "assets" / f"wavy-{n:02d}.jpg").read_bytes()
+            self.assertTrue(data.startswith(b"\xff\xd8\xff") and data.endswith(b"\xff\xd9"), n)
+            self.assertNotIn(b"Exif\x00\x00", data, "no camera/screenshot metadata")
+            self.assertLess(len(data), 400 * 1024)
+        # the hand-off screenshots (which contain a chat window) must never be committed
+        self.assertFalse([p for p in ROOT.rglob("*") if p.is_file() and "Screenshot_" in p.name and ".git" not in p.parts])
+
+
+class CatalogueSeedOnceTests(unittest.TestCase):
+    """Existing databases receive the photos once; deleting a product later is not undone by a restart."""
+
+    def run_server(self, data_dir):
+        ServerCase.start_server.__func__(ServerCase, data_dir=data_dir, env={"ADMIN_PASSWORD": "Z" + secrets.token_urlsafe(16)})
+        ServerCase.stop_server.__func__(ServerCase, remove_data=False)
+
+    def test_seed_runs_once(self):
+        import sqlite3
+        data_dir = tempfile.mkdtemp(prefix="fakhama-test-")
+        try:
+            self.run_server(data_dir)
+            db = Path(data_dir) / "store.db"
+            count = lambda: sqlite3.connect(db).execute("SELECT COUNT(*) FROM products WHERE slug LIKE 'wavy-%'").fetchone()[0]
+            self.assertEqual(count(), 18)
+            # Simulate a database created before the photos existed (no flag, no wavy rows).
+            conn = sqlite3.connect(db)
+            conn.execute("DELETE FROM products WHERE slug LIKE 'wavy-%'")
+            conn.execute("DELETE FROM settings WHERE key='seed_wavy_v1'")
+            conn.commit(); conn.close()
+            self.run_server(data_dir)
+            self.assertEqual(count(), 18, "photos are added to an existing database")
+            # The owner deletes one: it must stay deleted after a restart.
+            conn = sqlite3.connect(db); conn.execute("DELETE FROM products WHERE slug='wavy-05'"); conn.commit(); conn.close()
+            self.run_server(data_dir)
+            self.assertEqual(count(), 17)
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
+
+    def test_untouched_legacy_samples_are_retired_but_edited_ones_and_orders_are_kept(self):
+        import sqlite3
+        data_dir = tempfile.mkdtemp(prefix="fakhama-test-")
+        try:
+            self.run_server(data_dir)
+            db = Path(data_dir) / "store.db"
+            conn = sqlite3.connect(db)
+            conn.execute("DELETE FROM settings WHERE key='sample_cleanup_v1'")
+            ts = "2026-01-01T00:00:00+00:00"
+            def sample(slug, name, price):
+                cur = conn.execute("INSERT INTO products(name,slug,category,description,price,image,alt,badge,sku,stock,featured,active,created_at,updated_at) "
+                                   "VALUES(?,?,?,?,?,?,?,?,?,?,1,1,?,?)", (name, slug, "curtains", "x", price, "assets/legacy-sample.jpg", "x", "", "S", 5, ts, ts))
+                return cur.lastrowid
+            sample("sample-1", "ستائر بلاك أوت تفصيل", 450)                    # untouched, no orders  -> deleted
+            sample("sample-2", "ستائر شيفون ناعمة", 999)                        # owner changed the price -> kept
+            ordered = sample("sample-3", "ستارة رول بلاك أوت", 280)             # untouched but ordered -> hidden, history kept
+            oid = conn.execute("INSERT INTO orders(order_number,customer_name,phone,city,status,subtotal,delivery_fee,total,created_at,updated_at) "
+                               "VALUES('MH-X','ع','0551234567','جدة','new',280,0,280,?,?)", (ts, ts)).lastrowid
+            conn.execute("INSERT INTO order_items(order_id,product_id,product_name,sku,unit_price,quantity) VALUES(?,?,?,?,?,1)", (oid, ordered, "ستارة رول بلاك أوت", "S", 280))
+            conn.commit(); conn.close()
+            self.run_server(data_dir)
+            conn = sqlite3.connect(db)
+            rows = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT slug,active,price FROM products WHERE slug LIKE 'sample-%'")}
+            self.assertNotIn("sample-1", rows)
+            self.assertEqual(rows["sample-2"], (1, 999))
+            self.assertEqual(rows["sample-3"][0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM order_items WHERE product_id=?", (ordered,)).fetchone()[0], 1)
+            conn.close()
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
 
 
 class LegacyDataMigrationTests(unittest.TestCase):

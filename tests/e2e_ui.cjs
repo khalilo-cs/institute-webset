@@ -49,10 +49,20 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
     await page.goto(base + '/');
     await page.waitForSelector('.product-card');
-    await check('storefront lists 8 live products', async () => assert.strictEqual(await page.locator('.product-card').count(), 8))();
+    await check('storefront lists the 18 owner photos (no invented sample products)', async () => assert.strictEqual(await page.locator('.product-card').count(), 18))();
+    await check('only categories with products are shown (cards + filter chips use real photos)', async () => {
+      assert.strictEqual(await page.locator('#categoryGrid .category-card').count(), 1);
+      assert.strictEqual(await page.locator('#filterList .filter-chip').count(), 2);
+      assert.ok((await page.getAttribute('#categoryGrid .category-card img', 'src')).startsWith('/assets/wavy-'));
+    })();
+    await check('owner photos show "price on request", not 0 SAR', async () => {
+      const first = await page.locator('.product-card').first().textContent();
+      assert.ok(first.includes('ويفي') && first.includes('السعر حسب الطلب') && !first.includes('٠'), first);
+    })();
     await check('all product images decode', async () => {
-      const broken = await page.$$eval('img.product-image', imgs => imgs.filter(i => !i.complete || i.naturalWidth === 0).length);
-      assert.strictEqual(broken, 0);
+      // images are lazy-loaded: force them, then require every one to decode
+      const results = await page.$$eval('img.product-image', imgs => Promise.all(imgs.map(i => { i.loading = 'eager'; return i.decode().then(() => i.naturalWidth > 0, () => false); })));
+      assert.strictEqual(results.filter(ok => !ok).length, 0);
     })();
     await check('manifest + SW registered and active', async () => {
       const href = await page.getAttribute('link[rel=manifest]', 'href');
@@ -64,10 +74,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
     await check('search filters products', async () => {
       await page.click('#searchToggle'); // the search box is collapsed on phones
-      await page.fill('#searchInput', 'رول');
+      await page.fill('#searchInput', 'FAL-WAV-005');
       await page.waitForTimeout(150);
       const n = await page.locator('.product-card').count();
-      assert.ok(n >= 1 && n < 8, 'cards=' + n);
+      assert.strictEqual(n, 1, 'cards=' + n);
       await page.fill('#searchInput', '');
     })();
 
@@ -113,8 +123,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       await ap.evaluate(() => navigate('products'));
       await ap.waitForSelector('#productsBody .thumb');
       await ap.waitForTimeout(500);
-      const broken = await ap.$$eval('#productsBody img.thumb', imgs => imgs.filter(i => !i.complete || i.naturalWidth === 0).length);
-      assert.strictEqual(broken, 0);
+      const results = await ap.$$eval('#productsBody img.thumb', imgs => Promise.all(imgs.map(i => { i.loading = 'eager'; return i.decode().then(() => i.naturalWidth > 0, () => false); })));
+      assert.strictEqual(results.filter(ok => !ok).length, 0);
+      assert.ok((await ap.textContent('#productsBody')).includes('حسب الطلب'), 'admin shows price on request');
       await ap.screenshot({ path: path.join(SHOTS, '07-admin-products-mobile.png') });
     })();
     const png = path.join(dataDir, 'upload-test.png');

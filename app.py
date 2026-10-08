@@ -70,15 +70,37 @@ CATEGORIES = [
     ("electric", "ستائر كهربائية", 4),
     ("fabrics", "أقمشة الستائر", 5),
 ]
-SEED_PRODUCTS = [
-    ("ستائر بلاك أوت تفصيل", "curtains", "ستائر تعتيم تُفصّل حسب أبعاد النافذة. تختلف الخامة والسعر النهائي بحسب المقاس واختيار القماش.", 450, "assets/hero-curtains.jpg", "ستائر بلاك أوت وشيفون في غرفة معيشة أنيقة", "تفصيل حسب المقاس", "FAL-CUR-001", 20, 1),
-    ("ستائر شيفون ناعمة", "curtains", "قماش شيفون يضيف إضاءة ناعمة وأناقة للنافذة. يُؤكد السعر النهائي بعد تحديد الأبعاد والخامة.", 350, "assets/fabrics.jpg", "قماش شيفون وستائر بلون عاجي", "خامة ناعمة", "FAL-CUR-002", 20, 1),
-    ("ستارة رول بلاك أوت", "roller", "ستارة رول عملية للتحكم في الضوء والخصوصية، مع خيارات أقمشة وألوان متعددة بحسب التوفر.", 280, "assets/roller-curtains.jpg", "ستارة رول بلون رملي على نافذة عصرية", "رول تعتيم", "FAL-ROL-001", 15, 1),
-    ("ستائر شرائح معدنية", "blinds", "شرائح معدنية تسمح بضبط اتجاه الضوء، وتُجهز بقياس النافذة بعد تأكيد المقاس النهائي.", 320, "assets/venetian-blinds.jpg", "ستائر شرائح معدنية على نافذة مضيئة", "تحكم بالضوء", "FAL-BLI-001", 12, 1),
-    ("ستائر كهربائية بالتحكم", "electric", "نظام ستائر كهربائي للراحة اليومية. يحدد المتجر نوع المحرك وطريقة التركيب والتوافق بعد معاينة المقاس.", 1450, "assets/electric-curtains.jpg", "ستائر كهربائية طويلة في غرفة نوم هادئة", "تحكم مريح", "FAL-ELE-001", 6, 1),
-    ("أقمشة ستائر — السعر للمتر", "fabrics", "تشكيلة أقمشة للستائر بدرجات وخامات متعددة. السعر المعروض تجريبي للمتر، ويُؤكد السعر والتوفر قبل الطلب.", 95, "assets/fabrics.jpg", "عينات أقمشة ستائر بدرجات ترابية", "خيارات أقمشة", "FAL-FAB-001", 40, 1),
-    ("ستارة مزدوجة شيفون وبلاك أوت", "curtains", "تنسيق يجمع الشيفون مع قماش التعتيم للحصول على إضاءة وخصوصية مرنتين. السعر النهائي بعد تحديد المقاس.", 680, "assets/hero-curtains.jpg", "ستارة شيفون مع طبقة بلاك أوت في غرفة معيشة", "طبقتان أنيقتان", "FAL-CUR-003", 10, 1),
-    ("ستارة رول نهاري وليلي", "roller", "شرائح متناوبة للتحكم بدرجة الضوء والخصوصية. اختر اللون والمقاس النهائي مع فريق المتجر.", 430, "assets/roller-curtains.jpg", "ستارة رول نهاري وليلي بلون محايد", "نهاري وليلي", "FAL-ROL-002", 9, 1),
+# Sample rows that earlier versions seeded (slug -> name, price). They are placeholders, not store data: a database
+# that still holds them UNMODIFIED gets them retired once at startup (deleted, or hidden if an order references them).
+LEGACY_SAMPLES = {
+    "sample-1": ("ستائر بلاك أوت تفصيل", 450), "sample-2": ("ستائر شيفون ناعمة", 350),
+    "sample-3": ("ستارة رول بلاك أوت", 280), "sample-4": ("ستائر شرائح معدنية", 320),
+    "sample-5": ("ستائر كهربائية بالتحكم", 1450), "sample-6": ("أقمشة ستائر — السعر للمتر", 95),
+    "sample-7": ("ستارة مزدوجة شيفون وبلاك أوت", 680), "sample-8": ("ستارة رول نهاري وليلي", 430),
+}
+# The owner's real "wavy curtains, tailored to order" photos (assets/wavy-NN.jpg). The shop's catalogue shows no
+# prices for them, so price is 0, which the storefront and admin display as "price on request" (set after measuring).
+WAVY_DESCRIPTION = ("ستائر ويفي بطيّات متموجة تُفصَّل حسب الطلب. يتحدد السعر النهائي بحسب المقاس والخامة واللون؛ "
+                    "تواصل مع المتجر لمعاينة الخيارات وتأكيد التكلفة.")
+WAVY_ALTS = [
+    "ستائر ويفي رمادية مع شيفون لنافذة بانورامية بثلاثة أقسام",
+    "ستائر ويفي رمادية مع شيفون أبيض لنافذة كبيرة",
+    "ستائر ويفي كريمية ورمادية مع شيفون في صالة بإضاءة مخفية وثريا",
+    "ستائر ويفي كريمية على نافذة طويلة بإطار أسود",
+    "ستائر ويفي رمادية بيج مع شيفون أبيض في مجلس",
+    "ستائر ويفي بنية مع شيفون في غرفة جلوس",
+    "ستائر ويفي رمادية فاتحة تغطي جدارًا كاملًا",
+    "ستائر ويفي كريمية مع إضاءة مخفية في غرفة جلوس",
+    "ستائر ويفي رمادية داكنة مع شيفون في غرفة نوم",
+    "ستائر ويفي بنية مع شيفون في غرفة طعام",
+    "ستائر ويفي كريمية مع شيفون لنافذة عريضة",
+    "ستائر ويفي بيج مع ربطات جانبية لنافذة صغيرة",
+    "ستائر ويفي كريمية مع شيفون لنافذة مقوّسة",
+    "ستائر ويفي رمادية وبيج مع شيفون لنافذة مقوّسة",
+    "ستائر ويفي رمادية مع شيفون على جدار طويل بإضاءة مخفية",
+    "ستائر ويفي رمادية مع شيفون أبيض ولمبة سقف",
+    "ستائر ويفي رمادية فاتحة مع شيفون لنافذة",
+    "ستائر ويفي بيج مع شيفون لنافذة بثلاثة أقسام",
 ]
 DEFAULT_SETTINGS = {
     "store_name": "الفخامة للأقمشة والستائر",
@@ -217,16 +239,28 @@ def init_db() -> str | None:
         """)
         for slug, name, order in CATEGORIES:
             conn.execute("INSERT OR IGNORE INTO categories(slug,name,sort_order,active) VALUES(?,?,?,1)", (slug, name, order))
-        existing = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
-        if existing == 0:
-            ts = now_iso()
-            for index, (name, category, description, price, image, alt, badge, sku, stock, featured) in enumerate(SEED_PRODUCTS, 1):
-                slug = f"sample-{index}"
-                conn.execute("""INSERT INTO products(name,slug,category,description,price,image,alt,badge,sku,stock,featured,active,created_at,updated_at)
-                              VALUES(?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
-                             (name, slug, category, description, price, image, alt, badge, sku, stock, featured, ts, ts))
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key, value))
+        if not conn.execute("SELECT 1 FROM settings WHERE key='sample_cleanup_v1'").fetchone():
+            for slug, (name, price) in LEGACY_SAMPLES.items():
+                row = conn.execute("SELECT id FROM products WHERE slug=? AND name=? AND price=? AND (image LIKE '/assets/%' OR image LIKE 'assets/%')", (slug, name, price)).fetchone()
+                if not row:
+                    continue
+                if conn.execute("SELECT 1 FROM order_items WHERE product_id=? LIMIT 1", (row["id"],)).fetchone():
+                    conn.execute("UPDATE products SET active=0 WHERE id=?", (row["id"],))  # keep order history intact
+                else:
+                    conn.execute("DELETE FROM products WHERE id=?", (row["id"],))
+            conn.execute("INSERT INTO settings(key,value) VALUES('sample_cleanup_v1','1')")
+        seeded = conn.execute("SELECT value FROM settings WHERE key='seed_wavy_v1'").fetchone()
+        if not seeded:
+            ts = now_iso()
+            # Highest id first in the storefront (featured DESC, id DESC): insert model 18 first so model 1 shows first.
+            for number in range(len(WAVY_ALTS), 0, -1):
+                conn.execute("""INSERT OR IGNORE INTO products(name,slug,category,description,price,image,alt,badge,sku,stock,featured,active,created_at,updated_at)
+                              VALUES(?,?,?,?,0,?,?,?,?,999,1,1,?,?)""",
+                             (f"ستائر ويفي تفصيل حسب الطلب — موديل {number}", f"wavy-{number:02d}", "curtains", WAVY_DESCRIPTION,
+                              f"/assets/wavy-{number:02d}.jpg", WAVY_ALTS[number - 1], "تفصيل حسب الطلب", f"FAL-WAV-{number:03d}", ts, ts))
+            conn.execute("INSERT INTO settings(key,value) VALUES('seed_wavy_v1','1')")
         # Earlier versions stored relative image paths ("assets/x.jpg") that break under /admin/.
         conn.execute("UPDATE products SET image='/'||image WHERE image LIKE 'assets/%' OR image LIKE 'uploads/%'")
         admin = conn.execute("SELECT username FROM admins LIMIT 1").fetchone()
@@ -313,6 +347,8 @@ def product_dict(row: sqlite3.Row, category_name: str | None = None) -> dict:
 def order_dict(conn: sqlite3.Connection, row: sqlite3.Row, include_items: bool = True) -> dict:
     result = {key: row[key] for key in row.keys()}
     result["status_label"] = ORDER_STATUSES.get(row["status"], row["status"])
+    # True when some lines are "price on request" (unit price 0): the stored total does not include them yet.
+    result["on_request"] = bool(conn.execute("SELECT 1 FROM order_items WHERE order_id=? AND unit_price=0 LIMIT 1", (row["id"],)).fetchone())
     if include_items:
         result["items"] = [dict(item) for item in conn.execute(
             "SELECT product_id,product_name,sku,unit_price,quantity FROM order_items WHERE order_id=? ORDER BY id", (row["id"],)
@@ -606,7 +642,7 @@ class StoreHandler(BaseHTTPRequestHandler):
         alt = str(data.get("alt", "")).strip()[:250]
         badge = str(data.get("badge", "")).strip()[:60]
         sku = str(data.get("sku", "")).strip()[:80]
-        price = int_field(data.get("price"), "السعر", 1, 100_000_000)
+        price = int_field(data.get("price"), "السعر", 0, 100_000_000)  # 0 = price on request
         stock = int_field(data.get("stock", 0), "المخزون", 0, 1_000_000)
         if len(name) < 2: raise APIError("اسم المنتج مطلوب.")
         if not category: raise APIError("اختر قسمًا للمنتج.")

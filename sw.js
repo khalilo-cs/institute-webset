@@ -7,7 +7,7 @@
  *    never sees stale prices or stock.
  *  - Only the bundled, public brand images (/assets, /icons) are cached.
  */
-const CACHE = 'fakhama-static-v1';
+const CACHE = 'fakhama-static-v2';
 const OFFLINE_URL = '/offline.html';
 const PRECACHE = [OFFLINE_URL, '/icons/icon-192.png'];
 const NEVER_CACHE_PREFIXES = ['/api/', '/admin', '/uploads/'];

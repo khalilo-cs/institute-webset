@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f1e9">
+  <meta name="robots" content="noindex">
+  <title>لا يوجد اتصال | الفخامة للأقمشة والستائر</title>
+  <style>
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f8f6f0;color:#292720;font-family:system-ui,-apple-system,"Segoe UI",Tahoma,Arial,sans-serif;line-height:1.8;padding:24px;text-align:center}
+    main{max-width:420px}
+    .mark{width:64px;height:64px;border-radius:20px;background:#596654;color:#f8f4ec;display:grid;place-items:center;margin:0 auto 20px}
+    .mark svg{width:38px;height:38px}
+    h1{font-size:22px;margin:0 0 8px}
+    p{color:#6b6960;font-size:16px;margin:0 0 24px}
+    button{border:0;border-radius:999px;background:#596654;color:#fff;font:inherit;font-weight:700;padding:12px 28px;min-height:48px;cursor:pointer}
+    button:focus-visible{outline:3px solid #b99b70;outline-offset:3px}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18V6l8 6 8-6v12"/><path d="M8 18v-5m8 5v-5"/></svg></div>
+    <h1>لا يوجد اتصال بالإنترنت</h1>
+    <p>يلزم الاتصال لعرض المنتجات والأسعار والمخزون المحدّثة. تحقّق من الشبكة ثم أعد المحاولة.</p>
+    <button type="button" id="retry">إعادة المحاولة</button>
+  </main>
+  <script>document.getElementById('retry').addEventListener('click',function(){location.reload()});</script>
+</body>
+</html>

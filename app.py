@@ -27,16 +27,41 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "store.db"
-UPLOAD_DIR = BASE_DIR / "uploads"
+# DATA_DIR holds the mutable state (store.db + uploads/). Point it at a persistent volume in production.
+DATA_DIR = Path(os.environ.get("DATA_DIR") or BASE_DIR).expanduser().resolve()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = DATA_DIR / "store.db"
+UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
-HOST = os.environ.get("HOST", "0.0.0.0")
+ASSETS_DIR = BASE_DIR / "assets"
+ICONS_DIR = BASE_DIR / "icons"
+# Loopback by default; set HOST=0.0.0.0 only for LAN testing or inside a container behind a reverse proxy.
+HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "4173"))
-DEMO_ADMIN_USER = os.environ.get("ADMIN_USERNAME", "admin")
-DEMO_ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Fakhamah#2026Demo!")
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+# No default password lives in the source: it comes from ADMIN_PASSWORD or is generated at first run.
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+# Set TRUST_PROXY=1 only when running behind a reverse proxy that sets X-Forwarded-For / X-Forwarded-Proto.
+TRUST_PROXY = os.environ.get("TRUST_PROXY", "") == "1"
+# Optional canonical origin (https://example.com) used for robots.txt / sitemap.xml.
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
 SESSION_TTL = 12 * 60 * 60
 MAX_BODY = 7 * 1024 * 1024
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+ORDER_LIMIT = (int(os.environ.get("ORDER_LIMIT_PER_10MIN", "10")), 600)  # public order attempts per client per 10 minutes
+IMAGE_PATH_RE = re.compile(r"/?(?:assets|uploads)/[A-Za-z0-9][A-Za-z0-9._-]*")
+HOST_RE = re.compile(r"[A-Za-z0-9.\-]+(?::\d{1,5})?|\[[0-9A-Fa-f:]+\](?::\d{1,5})?")
+# Root-level files the server may serve (everything else is 404). Values are paths under BASE_DIR.
+PUBLIC_FILES = {
+    "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
+    "/admin-manifest.webmanifest": ("admin-manifest.webmanifest", "application/manifest+json"),
+    "/sw.js": ("sw.js", "text/javascript"),
+    "/offline.html": ("offline.html", "text/html"),
+    "/favicon.ico": ("icons/favicon.ico", "image/x-icon"),
+}
+CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+       "script-src 'self' 'unsafe-inline'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; "
+       "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
 
 CATEGORIES = [
     ("curtains", "ستائر تفصيل", 1),
@@ -124,8 +149,11 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 
-def init_db() -> None:
+def init_db() -> str | None:
+    """Create the schema and seed data. Returns the generated admin password on first run, else None."""
+    generated_password: str | None = None
     with connect_db() as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript("""
           CREATE TABLE IF NOT EXISTS categories (
             slug TEXT PRIMARY KEY,
@@ -199,13 +227,19 @@ def init_db() -> None:
                              (name, slug, category, description, price, image, alt, badge, sku, stock, featured, ts, ts))
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key, value))
+        # Earlier versions stored relative image paths ("assets/x.jpg") that break under /admin/.
+        conn.execute("UPDATE products SET image='/'||image WHERE image LIKE 'assets/%' OR image LIKE 'uploads/%'")
         admin = conn.execute("SELECT username FROM admins LIMIT 1").fetchone()
         if not admin:
-            username = DEMO_ADMIN_USER.strip() or "admin"
-            if len(DEMO_ADMIN_PASSWORD) < 12:
+            username = ADMIN_USERNAME.strip() or "admin"
+            password = ADMIN_PASSWORD
+            if not password:
+                password = generated_password = secrets.token_urlsafe(15)
+            elif len(password) < 12:
                 raise RuntimeError("ADMIN_PASSWORD must be at least 12 characters")
             conn.execute("INSERT INTO admins(username,password_hash,updated_at) VALUES(?,?,?)",
-                         (username, hash_password(DEMO_ADMIN_PASSWORD), now_iso()))
+                         (username, hash_password(password), now_iso()))
+    return generated_password
 
 
 def get_settings(conn: sqlite3.Connection) -> dict:
@@ -258,11 +292,19 @@ def save_image_data(data_uri: str) -> str:
     return f"/uploads/{filename}"
 
 
+def public_image(value: str) -> str:
+    """Images are always served from the site root, whichever page (/ or /admin/) requests them."""
+    value = value or ""
+    if value and not value.startswith(("/", "http://", "https://", "data:")):
+        value = "/" + value
+    return value
+
+
 def product_dict(row: sqlite3.Row, category_name: str | None = None) -> dict:
     return {
         "id": row["id"], "name": row["name"], "slug": row["slug"], "category": row["category"],
         "category_name": category_name or "", "description": row["description"], "price": row["price"],
-        "image": row["image"], "alt": row["alt"], "badge": row["badge"], "sku": row["sku"],
+        "image": public_image(row["image"]), "alt": row["alt"], "badge": row["badge"], "sku": row["sku"],
         "stock": row["stock"], "featured": bool(row["featured"]), "active": bool(row["active"]),
         "created_at": row["created_at"], "updated_at": row["updated_at"],
     }
@@ -280,24 +322,81 @@ def order_dict(conn: sqlite3.Connection, row: sqlite3.Row, include_items: bool =
 
 SESSIONS: dict[str, dict] = {}
 LOGIN_FAILURES: dict[str, list[float]] = {}
+ORDER_ATTEMPTS: dict[str, list[float]] = {}
+
+
+def purge_expired(table: dict, horizon: float, key_expires: bool = False) -> None:
+    """Drop stale entries so the in-memory tables cannot grow without bound."""
+    now = time.time()
+    for key in list(table):
+        value = table[key]
+        stale = value["expires"] < now if key_expires else not [t for t in value if now - t < horizon]
+        if stale:
+            table.pop(key, None)
+
+
+def allow_attempt(table: dict[str, list[float]], key: str, limit: int, window: int) -> bool:
+    """Sliding-window limiter. Records the attempt and returns False when `key` is over `limit`."""
+    now = time.time()
+    recent = [t for t in table.get(key, []) if now - t < window]
+    if len(recent) >= limit:
+        table[key] = recent
+        return False
+    recent.append(now)
+    table[key] = recent
+    if len(table) > 5000:
+        purge_expired(table, window)
+    return True
 
 
 class StoreHandler(BaseHTTPRequestHandler):
     server_version = "FakhamahStore/1.0"
+    sys_version = ""
 
     def log_message(self, fmt: str, *args) -> None:
         # Keep access logs useful without dumping request bodies or credentials.
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
+    def client_ip(self) -> str:
+        if TRUST_PROXY:
+            # The right-most entry is the one appended by our own proxy; earlier ones can be forged.
+            forwarded = self.headers.get("X-Forwarded-For", "").split(",")[-1].strip()
+            if forwarded:
+                return forwarded[:64]
+        return self.client_address[0]
+
+    def is_secure(self) -> bool:
+        return TRUST_PROXY and self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower() == "https"
+
+    def base_url(self) -> str:
+        if PUBLIC_BASE_URL:
+            return PUBLIC_BASE_URL
+        host = self.headers.get("Host", "")
+        if not HOST_RE.fullmatch(host):
+            host = f"localhost:{PORT}"
+        return f"{'https' if self.is_secure() else 'http'}://{host}"
+
     def _send(self, status: int, body: bytes, content_type: str = "application/json; charset=utf-8", headers: dict | None = None) -> None:
+        path = urlsplit(self.path).path
+        out = {
+            "Content-Type": content_type,
+            "Content-Length": str(len(body)),
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "Referrer-Policy": "strict-origin-when-cross-origin",
+            "Permissions-Policy": "geolocation=(), microphone=(), payment=(), usb=()",
+            "Cache-Control": "no-store",
+            "Connection": "close",
+        }
+        if content_type.startswith("text/html"):
+            out["Content-Security-Policy"] = CSP
+        if path.startswith(("/admin", "/api/admin")):
+            out["X-Robots-Tag"] = "noindex, nofollow"
+        if self.is_secure():
+            out["Strict-Transport-Security"] = "max-age=15552000"
+        out.update(headers or {})  # callers may override, e.g. Cache-Control for static files
         self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "close")
-        for key, value in (headers or {}).items():
+        for key, value in out.items():
             self.send_header(key, value)
         self.end_headers()
         if self.command != "HEAD":
@@ -371,6 +470,8 @@ class StoreHandler(BaseHTTPRequestHandler):
     def do_HEAD(self): self._run()
 
     def create_order(self) -> None:
+        if not allow_attempt(ORDER_ATTEMPTS, self.client_ip(), *ORDER_LIMIT):
+            raise APIError("تم إرسال طلبات كثيرة خلال وقت قصير. حاول بعد قليل أو تواصل مع المتجر هاتفيًا.", 429)
         data = self.read_json()
         name = str(data.get("name", "")).strip()[:120]
         phone = str(data.get("phone", "")).strip()[:30]
@@ -428,37 +529,55 @@ class StoreHandler(BaseHTTPRequestHandler):
         body = ("\ufeff" + output.getvalue()).encode("utf-8")
         self._send(200, body, "text/csv; charset=utf-8", {"Content-Disposition": "attachment; filename=orders.csv"})
 
-    def serve_static(self, path: str) -> None:
+    def resolve_static(self, path: str) -> tuple[Path, str | None] | None:
+        """Map a URL path to a file. Only whitelisted pages and the assets/uploads/icons folders are reachable."""
+        if "\x00" in path or "\\" in path:
+            return None
         if path in ("/", "/index.html"):
-            target = BASE_DIR / "index.html"
-        elif path in ("/admin", "/admin/", "/admin.html"):
-            target = BASE_DIR / "admin.html"
-        elif path.startswith("/assets/") or path.startswith("/uploads/"):
-            target = (BASE_DIR / path.lstrip("/")).resolve()
-            if not target.is_relative_to(BASE_DIR.resolve()):
-                self._send(404, b"Not found", "text/plain; charset=utf-8"); return
-        else:
+            return BASE_DIR / "index.html", None
+        if path in ("/admin", "/admin/", "/admin.html"):
+            return BASE_DIR / "admin.html", None
+        if path in PUBLIC_FILES:
+            name, content_type = PUBLIC_FILES[path]
+            return BASE_DIR / name, content_type
+        if path == "/.well-known/assetlinks.json":
+            # Only needed if a Trusted Web Activity build is ever added; supply the file via DIGITAL_ASSET_LINKS_FILE.
+            configured = os.environ.get("DIGITAL_ASSET_LINKS_FILE", "")
+            return (Path(configured), "application/json") if configured else None
+        for prefix, root in (("/assets/", ASSETS_DIR), ("/uploads/", UPLOAD_DIR), ("/icons/", ICONS_DIR)):
+            if path.startswith(prefix):
+                target = (root / path[len(prefix):]).resolve()
+                # Must stay inside this one folder: "/assets/../store.db" or "/assets/%2e%2e/app.py" resolve elsewhere.
+                if not target.is_relative_to(root.resolve()):
+                    return None
+                return target, None
+        return None
+
+    def serve_static(self, path: str) -> None:
+        found = self.resolve_static(path)
+        if not found or not found[0].is_file():
             self._send(404, b"Not found", "text/plain; charset=utf-8"); return
-        if not target.is_file():
-            self._send(404, b"Not found", "text/plain; charset=utf-8"); return
-        content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        if content_type.startswith("text/") or content_type in ("application/javascript", "application/json", "image/svg+xml"):
+        target, forced_type = found
+        content_type = forced_type or mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        if content_type.startswith("text/") or content_type in ("application/javascript", "application/json", "application/manifest+json"):
             content_type += "; charset=utf-8"
         try:
             body = target.read_bytes()
         except OSError:
             self._send(500, b"Unable to read file", "text/plain; charset=utf-8"); return
         headers = {"Last-Modified": formatdate(target.stat().st_mtime, usegmt=True)}
-        if path.startswith("/assets/") or path.startswith("/uploads/"):
+        if path.startswith(("/assets/", "/uploads/", "/icons/")):
             headers["Cache-Control"] = "public, max-age=3600"
         else:
             headers["Cache-Control"] = "no-cache"
+        if path == "/sw.js":
+            headers["Service-Worker-Allowed"] = "/"
         self._send(200, body, content_type, headers)
 
     def handle_login(self, data: dict) -> None:
         username = str(data.get("username", "")).strip()[:100]
         password = str(data.get("password", ""))[:200]
-        ip = self.client_address[0]
+        ip = self.client_ip()
         now = time.time()
         recent = [t for t in LOGIN_FAILURES.get(ip, []) if now - t < 300]
         if len(recent) >= 8:
@@ -469,11 +588,16 @@ class StoreHandler(BaseHTTPRequestHandler):
             recent.append(now); LOGIN_FAILURES[ip] = recent
             raise APIError("اسم المستخدم أو كلمة المرور غير صحيحة.", 401)
         LOGIN_FAILURES.pop(ip, None)
+        purge_expired(SESSIONS, 0, key_expires=True)
         token = secrets.token_urlsafe(36)
         csrf = secrets.token_urlsafe(24)
         SESSIONS[token] = {"username": admin["username"], "csrf": csrf, "expires": now + SESSION_TTL}
-        cookie = f"fakhama_admin={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL}"
-        self.send_json({"ok": True, "username": admin["username"], "csrf": csrf}, 200, {"Set-Cookie": cookie})
+        self.send_json({"ok": True, "username": admin["username"], "csrf": csrf}, 200,
+                       {"Set-Cookie": self.session_cookie(token, SESSION_TTL)})
+
+    def session_cookie(self, value: str, max_age: int) -> str:
+        secure = "; Secure" if self.is_secure() else ""
+        return f"fakhama_admin={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}"
 
     def save_product(self, product_id: int | None, data: dict) -> None:
         name = str(data.get("name", "")).strip()[:140]
@@ -497,8 +621,12 @@ class StoreHandler(BaseHTTPRequestHandler):
                 image = save_image_data(data["image_data"])
             elif data.get("image"):
                 image_value = str(data["image"]).strip()
-                if image_value.startswith("/assets/") or image_value.startswith("/uploads/") or image_value.startswith("assets/"):
-                    image = image_value
+                # Only an existing file under assets/ or uploads/ is accepted; anything else keeps the current image.
+                if IMAGE_PATH_RE.fullmatch(image_value):
+                    image_value = "/" + image_value.lstrip("/")
+                    root = ASSETS_DIR if image_value.startswith("/assets/") else UPLOAD_DIR
+                    if (root / image_value.split("/", 2)[2]).is_file():
+                        image = image_value
             if not image: raise APIError("أضف صورة للمنتج.")
             slug_base = slugify(str(data.get("slug", name)))
             slug = slug_base
@@ -530,7 +658,7 @@ class StoreHandler(BaseHTTPRequestHandler):
             session = self.require_admin(write=True)
             if not session: return
             SESSIONS.pop(session["token"], None)
-            self.send_json({"ok": True}, 200, {"Set-Cookie": "fakhama_admin=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"}); return
+            self.send_json({"ok": True}, 200, {"Set-Cookie": self.session_cookie("", 0)}); return
         if path == "/api/admin/products" and self.command == "POST":
             if not self.require_admin(write=True): return
             self.save_product(None, self.read_json()); return
@@ -579,6 +707,10 @@ class StoreHandler(BaseHTTPRequestHandler):
             if not self.require_admin(write=True): return
             data = self.read_json()
             allowed = {"store_name": 100, "tagline": 160, "city": 100, "phone": 40, "whatsapp": 40, "address": 250, "map_url": 400, "delivery_note": 400, "instagram": 250, "seo_title": 180, "seo_description": 320, "hero_title": 180, "hero_copy": 600}
+            for url_key in ("map_url", "instagram"):
+                # These values end up in href attributes on the storefront; allow web links only (no javascript: etc.).
+                if str(data.get(url_key, "")).strip() and not re.match(r"https?://[^\s]+$", str(data[url_key]).strip(), re.I):
+                    raise APIError("الروابط يجب أن تبدأ بـ https:// أو http://")
             with connect_db() as conn:
                 for key, limit in allowed.items():
                     if key in data:
@@ -601,6 +733,9 @@ class StoreHandler(BaseHTTPRequestHandler):
                 row = conn.execute("SELECT password_hash FROM admins WHERE username=?", (session["username"],)).fetchone()
                 if not row or not verify_password(old, row["password_hash"]): raise APIError("كلمة المرور الحالية غير صحيحة.", 403)
                 conn.execute("UPDATE admins SET password_hash=?,updated_at=? WHERE username=?", (hash_password(new), now_iso(), session["username"]))
+            # A new password revokes every other signed-in device; only the session that made the change survives.
+            for token in [t for t, s in SESSIONS.items() if s["username"] == session["username"] and t != session["token"]]:
+                SESSIONS.pop(token, None)
             self.send_json({"ok": True}); return
         if path.startswith("/api/admin/"):
             if self.command == "GET":
@@ -679,8 +814,7 @@ class StoreHandler(BaseHTTPRequestHandler):
                 if path == "/api/admin/me":
                     session = self.require_admin()
                     if session:
-                        with connect_db() as conn: admin = conn.execute("SELECT username FROM admins LIMIT 1").fetchone()
-                        self.send_json({"authenticated": True, "username": admin["username"], "csrf": session["csrf"]})
+                        self.send_json({"authenticated": True, "username": session["username"], "csrf": session["csrf"]})
                     return
                 if path == "/api/admin/dashboard":
                     if not self.require_admin(): return
@@ -719,13 +853,18 @@ class StoreHandler(BaseHTTPRequestHandler):
                 if path == "/api/admin/export/orders.csv":
                     if not self.require_admin(): return
                     self.export_orders(); return
-                if path == "/robots.txt":
-                    host = self.headers.get("Host", "localhost")
-                    body = f"User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /api/admin/\nSitemap: https://{host}/sitemap.xml\n".encode()
-                    self._send(200, body, "text/plain; charset=utf-8"); return
-                if path == "/sitemap.xml":
-                    host = self.headers.get("Host", "localhost")
-                    body = f"<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"><url><loc>https://{host}/</loc><changefreq>daily</changefreq></url></urlset>".encode()
+                if path in ("/robots.txt", "/sitemap.xml"):
+                    # Crawlers are kept out until the owner marks the store data as real and ready (Settings → site_ready).
+                    with connect_db() as conn: ready = get_settings(conn).get("site_ready", "0") == "1"
+                    if path == "/robots.txt":
+                        if ready:
+                            text = f"User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /api/\nSitemap: {self.base_url()}/sitemap.xml\n"
+                        else:
+                            text = "User-agent: *\nDisallow: /\n"
+                        self._send(200, text.encode(), "text/plain; charset=utf-8"); return
+                    if not ready:
+                        self._send(404, b"Not found", "text/plain; charset=utf-8"); return
+                    body = f"<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"><url><loc>{self.base_url()}/</loc><changefreq>daily</changefreq></url></urlset>".encode()
                     self._send(200, body, "application/xml; charset=utf-8"); return
                 if path.startswith("/api/"):
                     self.send_json({"error": "المسار غير موجود."}, 404); return
@@ -738,13 +877,16 @@ class StoreHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    init_db()
+    first_run_password = init_db()
     server = ThreadingHTTPServer((HOST, PORT), StoreHandler)
     server.daemon_threads = True
     print(f"\nموقع المتجر: http://{HOST}:{PORT}/")
     print(f"لوحة الإدارة: http://{HOST}:{PORT}/admin")
-    print(f"دخول العرض فقط — المستخدم: {DEMO_ADMIN_USER} | كلمة المرور: {DEMO_ADMIN_PASSWORD}")
-    print("تنبيه: غيّر كلمة مرور المدير واضبط متغيرات البيئة قبل أي نشر عام.\n", flush=True)
+    if first_run_password:
+        # Shown once, never stored in plain text. Copy it now and change it from Settings → Security.
+        print(f"أُنشئ حساب المدير لأول مرة — المستخدم: {ADMIN_USERNAME.strip() or 'admin'}")
+        print(f"كلمة المرور المولّدة (تظهر هذه المرة فقط): {first_run_password}")
+    print("تنبيه: غيّر كلمة مرور المدير وفعّل HTTPS قبل أي نشر عام.\n", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

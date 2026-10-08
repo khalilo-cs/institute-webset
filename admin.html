@@ -2,6 +2,10 @@
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#f5f2eb">
+  <meta name="robots" content="noindex,nofollow">
+  <link rel="manifest" href="/admin-manifest.webmanifest">
+  <link rel="icon" href="/icons/admin-icon-192.png" sizes="192x192" type="image/png">
+  <link rel="apple-touch-icon" href="/icons/admin-apple-touch-icon.png">
   <title>لوحة الإدارة | الفخامة للأقمشة والستائر</title>
   <style>
     :root{--bg:#f5f3ee;--paper:#fffefa;--ink:#2d2d27;--muted:#838176;--line:#e9e6de;--olive:#596654;--olive-dark:#44503f;--sage:#edf0e9;--gold:#b99969;--clay:#b77258;--red:#b9524f;--green:#528066;--shadow:0 16px 42px rgba(38,39,33,.09);--font:system-ui,-apple-system,"Segoe UI",Tahoma,Arial,sans-serif}
@@ -14,7 +18,60 @@
     @media(max-width:1100px){.sidebar{width:225px}.main{margin-right:225px}.content{padding:24px}.topbar{padding:0 24px}.stats-grid{grid-template-columns:repeat(2,1fr)}.dashboard-grid{grid-template-columns:1fr}.category-grid{grid-template-columns:repeat(2,1fr)}}
     @media(max-width:760px){.login-view{grid-template-columns:1fr}.login-visual{display:none}.login-card-wrap{min-height:100vh;padding:18px}.login-card{padding:28px 23px}.sidebar{transform:translateX(105%);width:270px}.sidebar.open{transform:translateX(0)}.sidebar-overlay.open{display:block;position:fixed;inset:0;z-index:29;background:rgba(23,24,20,.4)}.main{margin-right:0}.topbar{height:65px;padding:0 15px}.menu-button{display:grid}.topbar-title{margin-left:auto;margin-right:10px}.topbar-title h1{font-size:15px}.topbar-title p{display:none}.content{padding:20px 15px 35px}.store-link{font-size:9px}.stats-grid{gap:9px}.stat-card{padding:13px;min-height:95px}.stat-value{font-size:22px}.stat-icon{width:32px;height:32px}.page-head{align-items:flex-start;flex-direction:column}.page-head h2{font-size:19px}.toolbar{align-items:stretch}.toolbar-group{width:100%}.search-control{min-width:0;flex:1}.category-grid{grid-template-columns:1fr}.category-card{padding:12px}.form-card{padding:16px}.modal-backdrop{padding:8px}.modal-box{padding:19px 15px;max-height:96vh}.modal-grid,.settings-grid{grid-template-columns:1fr}.modal-grid .field.full,.form-card .field.full{grid-column:auto}.order-detail-grid{grid-template-columns:1fr 1fr}.table-wrap{margin-inline:-15px;width:calc(100% + 30px)}.data-table th,.data-table td{padding:10px 9px}.category-actions{flex-direction:column}}
     @media(max-width:420px){.stats-grid{grid-template-columns:1fr 1fr}.stat-label{font-size:9px}.stat-value{font-size:20px}.stat-foot{font-size:8px}.order-detail-grid{grid-template-columns:1fr}.topbar-actions{gap:6px}.store-link span{display:none}}
-  </style>
+  
+    /* readability-floor:start — phone screens: text is never smaller than 11px (labels) / 12px (copy) / 13px (names, prices) */
+    @media (max-width:760px){
+      .small{font-size:13px}
+      .login-brand small{font-size:12px}
+      .field label{font-size:13px}
+      .btn.small-btn{font-size:12px}
+      .login-error{font-size:13px}
+      .login-hint{font-size:12px}
+      .sidebar-brand small{font-size:12px}
+      .nav-label{font-size:12px}
+      .side-nav button{font-size:13px}
+      .admin-profile b{font-size:12px}
+      .admin-profile small{font-size:12px}
+      .side-bottom button{font-size:12px}
+      .topbar-title p{font-size:12px}
+      .store-link{font-size:12px}
+      .page-head p{font-size:12px}
+      .stat-label{font-size:12px}
+      .stat-foot{font-size:12px}
+      .panel-head a,.panel-head button{font-size:12px}
+      .notice-card{font-size:12px}
+      .notice-card b{font-size:13px}
+      .quick-link{font-size:12px}
+      .quick-link small{font-size:12px}
+      .data-table th{font-size:12px}
+      .data-table td{font-size:12px}
+      .product-cell b{font-size:12px}
+      .product-cell small{font-size:11px}
+      .badge{font-size:11px}
+      .status-select{font-size:12px}
+      .table-empty{font-size:13px}
+      .search-control input{font-size:12px}
+      .select-control{font-size:12px}
+      .chip{font-size:12px}
+      .subtle{font-size:12px}
+      .form-card>p{font-size:12px}
+      .form-card .field label{font-size:12px}
+      .form-card .field input,.form-card .field textarea{font-size:13px}
+      .inline-check{font-size:12px}
+      .category-info b{font-size:13px}
+      .category-info small{font-size:12px}
+      .security-note{font-size:12px}
+      .modal-header p{font-size:12px}
+      .image-picker label{font-size:12px}
+      .image-picker small{font-size:12px}
+      .image-picker input{font-size:12px}
+      .detail-block small{font-size:12px}
+      .detail-block b{font-size:13px}
+      .order-item-row{font-size:12px}
+      .toast{font-size:12px}
+    }
+    /* readability-floor:end */
+</style>
 </head>
 <body>
   <section class="login-view" id="loginScreen">
@@ -136,10 +193,11 @@
       <form id="settingsForm" class="form-card"><h3>بيانات المتجر والتواصل</h3><p>أكمل المعلومات الحقيقية قبل إطلاق الموقع للزوار.</p><div class="settings-grid"><div class="field"><label for="sName">اسم المتجر</label><input id="sName" required maxlength="100" value="${esc(s.store_name)}"></div><div class="field"><label for="sTagline">عبارة تعريفية قصيرة</label><input id="sTagline" maxlength="160" value="${esc(s.tagline)}"></div><div class="field"><label for="sCity">المدينة</label><input id="sCity" maxlength="100" value="${esc(s.city)}"></div><div class="field"><label for="sPhone">رقم الهاتف</label><input id="sPhone" type="tel" maxlength="40" value="${esc(s.phone)}" placeholder="+966..."></div><div class="field"><label for="sWhatsApp">رقم واتساب بصيغة دولية</label><input id="sWhatsApp" type="tel" maxlength="40" value="${esc(s.whatsapp)}" placeholder="9665xxxxxxxx"></div><div class="field"><label for="sDeliveryFee">رسوم التوصيل الثابتة (ر.س)</label><input id="sDeliveryFee" type="number" min="0" step="1" value="${esc(s.delivery_fee)}"></div><div class="field full"><label for="sAddress">العنوان</label><input id="sAddress" maxlength="250" value="${esc(s.address)}" placeholder="أضف عنوان الفرع أو نطاق الخدمة"></div><div class="field full"><label for="sMapUrl">رابط موقع المحل على خرائط Google</label><input id="sMapUrl" type="url" maxlength="400" value="${esc(s.map_url||'')}" placeholder="https://maps.app.goo.gl/..."></div><div class="field full"><label for="sDeliveryNote">معلومة التوصيل المعروضة للعميل</label><textarea id="sDeliveryNote" maxlength="400">${esc(s.delivery_note)}</textarea></div><div class="field full"><label for="sInstagram">رابط حساب إنستغرام (اختياري)</label><input id="sInstagram" type="url" maxlength="250" value="${esc(s.instagram)}" placeholder="https://instagram.com/yourstore"></div><div class="field full"><label for="sHeroTitle">عنوان الواجهة الرئيسية</label><input id="sHeroTitle" maxlength="180" value="${esc(s.hero_title)}"></div><div class="field full"><label for="sHeroCopy">الوصف أسفل العنوان</label><textarea id="sHeroCopy" maxlength="600">${esc(s.hero_copy)}</textarea></div><div class="field full"><label for="sSeoTitle">عنوان SEO الذي يظهر في نتائج البحث</label><input id="sSeoTitle" maxlength="180" value="${esc(s.seo_title)}"></div><div class="field full"><label for="sSeoDescription">وصف SEO لمحركات البحث (حتى 320 حرفًا)</label><textarea id="sSeoDescription" maxlength="320">${esc(s.seo_description)}</textarea></div><div class="field full"><label class="inline-check"><input id="sSiteReady" type="checkbox" ${s.site_ready==='1'?'checked':''}> بيانات المتجر حقيقية وجاهزة للنشر والفهرسة في Google</label><span class="subtle">فعّل هذا الخيار بعد استبدال البيانات التجريبية، ربط النطاق وHTTPS، ومراجعة سياسات المتجر.</span></div></div><div class="form-actions"><button class="btn" type="submit">حفظ بيانات المتجر</button></div></form>
       <form id="passwordForm" class="form-card password-form"><h3>أمان لوحة الإدارة</h3><p>غيّر كلمة المرور الافتراضية قبل مشاركة الموقع أو نشره.</p><div class="security-note">استخدم كلمة مرور فريدة من 12 خانة على الأقل. لا تشارك بيانات المدير مع العملاء، وفعّل HTTPS قبل النشر.</div><div class="field"><label for="oldPassword">كلمة المرور الحالية</label><input id="oldPassword" type="password" required autocomplete="current-password"></div><div class="field"><label for="newPassword">كلمة المرور الجديدة</label><input id="newPassword" type="password" required minlength="12" autocomplete="new-password"></div><div class="field"><label for="confirmPassword">تأكيد كلمة المرور الجديدة</label><input id="confirmPassword" type="password" required minlength="12" autocomplete="new-password"></div><div class="form-actions"><button class="btn" type="submit">تغيير كلمة المرور</button></div></form>`;
       $('#settingsForm').addEventListener('submit',async e=>{e.preventDefault();try{await api('/api/admin/settings',{method:'PUT',body:{store_name:$('#sName').value.trim(),tagline:$('#sTagline').value.trim(),city:$('#sCity').value.trim(),phone:$('#sPhone').value.trim(),whatsapp:$('#sWhatsApp').value.trim(),delivery_fee:Number($('#sDeliveryFee').value),address:$('#sAddress').value.trim(),map_url:$('#sMapUrl').value.trim(),delivery_note:$('#sDeliveryNote').value.trim(),instagram:$('#sInstagram').value.trim(),hero_title:$('#sHeroTitle').value.trim(),hero_copy:$('#sHeroCopy').value.trim(),seo_title:$('#sSeoTitle').value.trim(),seo_description:$('#sSeoDescription').value.trim(),site_ready:$('#sSiteReady').checked}});toast('تم حفظ بيانات المتجر')}catch(err){toast(err.message)}});
-      $('#passwordForm').addEventListener('submit',async e=>{e.preventDefault();if($('#newPassword').value!==$('#confirmPassword').value){toast('كلمتا المرور الجديدتان غير متطابقتين');return}try{await api('/api/admin/password',{method:'POST',body:{current_password:$('#oldPassword').value,new_password:$('#newPassword').value}});e.currentTarget.reset();toast('تم تحديث كلمة المرور بنجاح')}catch(err){toast(err.message)}});
+      $('#passwordForm').addEventListener('submit',async e=>{e.preventDefault();const formEl=e.currentTarget;if($('#newPassword').value!==$('#confirmPassword').value){toast('كلمتا المرور الجديدتان غير متطابقتين');return}try{await api('/api/admin/password',{method:'POST',body:{current_password:$('#oldPassword').value,new_password:$('#newPassword').value}});formEl.reset();toast('تم تحديث كلمة المرور بنجاح')}catch(err){toast(err.message)}});
     }
     async function renderPage(){if($('#appShell').classList.contains('hidden'))return;$('#pageContent').innerHTML='<div class="panel"><div class="panel-body muted small">جارٍ تحميل البيانات…</div></div>';try{if(currentPage==='overview')await renderOverview();else if(currentPage==='products')await renderProducts();else if(currentPage==='orders')await renderOrders();else if(currentPage==='categories')await renderCategories();else if(currentPage==='settings')await renderSettings()}catch(e){$('#pageContent').innerHTML=`<div class="panel"><div class="table-empty"><b>تعذر تحميل الصفحة</b>${esc(e.message)} <button class="btn secondary small-btn" onclick="renderPage()">إعادة المحاولة</button></div></div>`}}
     checkSession();
+    if('serviceWorker' in navigator&&!/AlfakhamahApp\//.test(navigator.userAgent))window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));
   </script>
 </body>
 </html>

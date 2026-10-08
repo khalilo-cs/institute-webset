@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+store.db
+store.db-shm
+store.db-wal
+uploads/*
+!uploads/.gitkeep

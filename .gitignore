@@ -10,3 +10,6 @@ uploads/*
 *.keystore
 keystore.properties
 local.properties
+*.pid
+server.log
+dist/

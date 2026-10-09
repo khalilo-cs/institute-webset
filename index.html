@@ -714,6 +714,34 @@
       .contact-actions .btn{min-height:46px}
     }
     .noscript-note a{text-decoration:underline;font-weight:700}
+    /* consent:start — optional Google Analytics consent banner (rendered by the server only when the owner set a GA4 ID).
+       Non-modal region pinned to the bottom; the page reserves its height so focused content is never hidden behind it. */
+    html.has-consent{scroll-padding-bottom:calc(var(--consent-h,0px) + 16px)}
+    html.has-consent body{padding-bottom:var(--consent-h,0px)}
+    html.has-consent .to-top{bottom:calc(var(--consent-h,0px) + 14px)}
+    html.has-consent .toast{bottom:calc(var(--consent-h,0px) + 14px)}
+    .consent-banner{position:fixed;right:0;left:0;bottom:0;z-index:45;background:linear-gradient(180deg,#1e1a15,#15130f);color:var(--ivory);border-top:1px solid rgba(234,214,166,.35);box-shadow:0 -24px 50px -30px rgba(0,0,0,.65);padding:16px 0 calc(16px + env(safe-area-inset-bottom,0px))}
+    .consent-inner{display:flex;align-items:center;justify-content:space-between;gap:14px 28px}
+    .consent-copy{min-width:0;max-width:760px}
+    .consent-banner h2{margin:0 0 4px;font-family:var(--display);font-size:18px;font-weight:700;color:var(--gold-2);line-height:1.5}
+    .consent-banner p{margin:0;font-size:14px;line-height:1.85;color:rgba(253,250,244,.9)}
+    .consent-banner a{color:var(--gold-2);text-decoration:underline;text-underline-offset:4px;font-weight:700}
+    .consent-banner .consent-current{margin-top:4px;font-size:13px;color:#e6dcc8}
+    .consent-actions{display:flex;gap:10px;flex:0 0 auto}
+    .consent-btn{min-width:112px;min-height:48px;background:transparent;color:var(--ivory);border:1px solid rgba(234,214,166,.6);box-shadow:none}
+    .consent-btn:hover{background:rgba(234,214,166,.14);border-color:var(--gold-2);color:#fff}
+    .consent-banner :focus-visible{outline-color:var(--gold-2);box-shadow:0 0 0 6px rgba(21,19,15,.6)}
+    .cookie-settings{display:inline-flex;align-items:center;min-height:44px;padding:0;border:0;background:none;color:inherit;font:inherit;text-decoration:underline;text-decoration-color:rgba(234,214,166,.4);text-underline-offset:5px;cursor:pointer}
+    .cookie-settings:hover{color:var(--gold-2)}
+    @media (prefers-reduced-motion:no-preference){.consent-banner:not([hidden]){animation:consent-in .5s var(--ease) both}}
+    @keyframes consent-in{from{transform:translateY(100%)}to{transform:none}}
+    @media (max-width:720px){
+      .consent-inner{flex-direction:column;align-items:stretch}
+      .consent-banner h2{font-size:17px}.consent-banner p{font-size:14px;line-height:1.8}
+      .consent-actions .consent-btn{flex:1 1 0;min-width:0}
+    }
+    @media print{.consent-banner,.cookie-settings{display:none!important}html.has-consent body{padding-bottom:0}}
+    /* consent:end */
     /* luxe:end */
 </style>
   <script id="localBusinessSchema" type="application/ld+json">
@@ -887,7 +915,7 @@
         <nav class="footer-col" aria-labelledby="footerInfoTitle"><h3 id="footerInfoTitle">معلومات</h3><div class="footer-links"><a href="/about">من نحن</a><a href="/#services">أنواع الستائر</a><a href="/#guide">دليل قياس الستائر</a><a href="/faq">الأسئلة الشائعة</a><a href="/contact">تواصل معنا</a><a href="/admin/" rel="nofollow">دخول الإدارة</a></div></nav>
         <div class="footer-col"><h3>بيانات المتجر</h3><div class="footer-contact"><div><b>المدينة:</b> <span data-store-city>أضف المدينة</span></div><div><b>الدولة:</b> المملكة العربية السعودية</div><div><b>العنوان:</b> <a id="storeAddress" href="https://maps.app.goo.gl/kn2kxuPujQT9raLG7?g_st=awb" target="_blank" rel="noopener">شارع المكرونة، مجمع الشرق</a></div><div><b>التواصل:</b> <span id="storeContact">أضف رقم الهاتف أو واتساب</span></div><div><a id="storeMapFooter" href="https://maps.app.goo.gl/kn2kxuPujQT9raLG7?g_st=awb" target="_blank" rel="noopener">افتح الموقع على خرائط Google ↗</a></div></div></div>
       </div>
-      <div class="footer-bottom"><p>© <span id="year"></span> <span data-store-name>الفخامة للأقمشة والستائر</span>. جميع الحقوق محفوظة.</p><div class="legal"><a href="/terms">الشروط والأحكام</a><a href="/privacy">سياسة الخصوصية</a></div></div>
+      <div class="footer-bottom"><p>© <span id="year"></span> <span data-store-name>الفخامة للأقمشة والستائر</span>. جميع الحقوق محفوظة.</p><div class="legal"><a href="/terms">الشروط والأحكام</a><a href="/privacy">سياسة الخصوصية</a><!--cookie-settings--></div></div>
     </div>
   </footer>
 
@@ -900,6 +928,8 @@
 
   <div class="modal-backdrop" id="productModal" role="dialog" aria-modal="true" aria-label="تفاصيل المنتج"><div class="modal-box"><button class="modal-close" data-close-modal aria-label="إغلاق"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg></button><div id="productModalContent"></div></div></div>
   <div class="modal-backdrop" id="orderModal" role="dialog" aria-modal="true" aria-labelledby="orderTitle"><div class="modal-box order-modal"><button class="modal-close" data-close-modal aria-label="إغلاق"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg></button><h2 id="orderTitle">بيانات الطلب</h2><p>أدخل بيانات التواصل لتسجيل الطلب في النظام وإظهاره في لوحة إدارة المتجر.</p><form id="orderForm"><div class="form-grid"><div class="form-field"><label for="customerName">الاسم</label><input id="customerName" name="name" required autocomplete="name" placeholder="اسمك الكامل"></div><div class="form-field"><label for="customerPhone">رقم الجوال</label><input id="customerPhone" name="phone" type="tel" inputmode="tel" required autocomplete="tel" placeholder="05xxxxxxxx"></div><div class="form-field full"><label for="customerCity">المدينة</label><input id="customerCity" name="city" required autocomplete="address-level2" placeholder="مثال: الرياض"></div><div class="form-field full"><label for="customerAddress">العنوان (اختياري)</label><input id="customerAddress" name="address" autocomplete="street-address" maxlength="250" placeholder="الحي والشارع"></div><div class="form-field full"><label for="customerNote">ملاحظة (اختياري)</label><textarea id="customerNote" name="note" placeholder="موعد مناسب أو استفسار عن المنتج"></textarea></div></div><label class="consent"><input type="checkbox" name="consent" required> <span>أوافق على <a href="/privacy" target="_blank" rel="noopener">سياسة الخصوصية</a> وعلى استخدام بياناتي لمعالجة طلبي.</span></label><button class="btn btn-primary" type="submit">تأكيد الطلب وتسجيله</button><p class="form-disclaimer">يُحفظ الطلب في النظام ليتمكن المتجر من مراجعته والتواصل معك. لا يتم تحصيل مبلغ إلكتروني.</p></form></div></div>
+<!--consent:start-->
+<!--consent:end-->
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <script>
@@ -1205,7 +1235,75 @@ on($('#orderForm'),'submit',async e=>{
   const payload={name:String(form.get('name')||'').trim(),phone:String(form.get('phone')||'').trim(),city:String(form.get('city')||'').trim(),address:String(form.get('address')||'').trim(),note:String(form.get('note')||'').trim(),consent:form.get('consent')==='on',items:cart.map(item=>({product_id:Number(item.id),quantity:item.qty}))};
   try{const response=await fetch('/api/orders',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':orderKey||(orderKey=newKey())},body:JSON.stringify(payload)});const data=await response.json();if(!response.ok)throw new Error(data.error||'تعذر تسجيل الطلب.');orderKey=null;cart=[];saveState();renderCart();closeModal($('#orderModal'));formEl.reset();toast(`تم تسجيل طلبك ${data.order_number} بنجاح`)}catch(err){toast(err.message||'تعذر الاتصال بالمتجر؛ حاول مرة أخرى.')}finally{btn.disabled=false}
 });
+// --- optional Google Analytics 4. The server renders #consentBanner (with the owner's measurement ID) only when one is set;
+// without it this does nothing. Nothing from Google loads until the visitor presses «قبول»; «رفض» loads nothing.
+const CONSENT_KEY='fakhama-consent-v1',PAGE_NONCE=document.currentScript?.nonce||document.querySelector('script[nonce]')?.nonce||'';
+let gaLoaded=false,gaWithdrawn=false;
+const GA_HIT=/^https:\/\/([a-z0-9-]+\.)*(google-analytics\.com|analytics\.google\.com)\//;
+function loadAnalytics(id){
+  window.dataLayer=window.dataLayer||[];
+  if(!window.gtag)window.gtag=function(){window.dataLayer.push(arguments)};
+  window['ga-disable-'+id]=false;gaWithdrawn=false;
+  if(gaLoaded){gtag('consent','update',{analytics_storage:'granted'});return}
+  gaLoaded=true;
+  // Consent Mode: everything denied by default, then only analytics granted (no ads, no Google signals).
+  gtag('consent','default',{ad_storage:'denied',ad_user_data:'denied',ad_personalization:'denied',analytics_storage:'denied'});
+  gtag('consent','update',{analytics_storage:'granted'});
+  gtag('js',new Date());
+  gtag('config',id,{allow_google_signals:false,allow_ad_personalization_signals:false});
+  // Two requests are answered locally (nothing is sent), every other request goes out unchanged:
+  // - gtag.js retries a hit whose fetch failed (typically one sent while the page unloads) on https://www.google.com/g/collect.
+  //   That host is not on this shop's CSP allowlist, so the browser would block it and log a CSP violation.
+  // - after «رفض», hits gtag had already queued (it flushes them when the page unloads) must not leave either.
+  const nativeFetch=window.fetch;
+  if(nativeFetch&&!nativeFetch.fakhamaGuard){
+    const guarded=function(input,init){
+      const url=String(input instanceof Request?input.url:input);
+      return url.startsWith('https://www.google.com/g/collect')||(gaWithdrawn&&GA_HIT.test(url))?Promise.resolve(new Response(null,{status:204})):nativeFetch.call(window,input,init);
+    };
+    guarded.fakhamaGuard=true;window.fetch=guarded;
+  }
+  const s=document.createElement('script');s.async=true;s.src='https://www.googletagmanager.com/gtag/js?id='+encodeURIComponent(id);
+  if(PAGE_NONCE)s.nonce=PAGE_NONCE; // the page's CSP nonce: the tag is allowed without 'unsafe-inline'
+  document.head.appendChild(s);
+}
+function revokeAnalytics(id){
+  window['ga-disable-'+id]=true;gaWithdrawn=true; // Google's documented switch: no further hits from this page
+  if(window.gtag)gtag('consent','update',{analytics_storage:'denied'});
+  const parts=location.hostname.split('.');
+  document.cookie.split(';').map(c=>c.trim().split('=')[0]).filter(n=>n==='_ga'||n.startsWith('_ga_')||n==='_gid').forEach(n=>{
+    document.cookie=`${n}=; Max-Age=0; path=/`;
+    for(let i=0;i<parts.length-1;i++)document.cookie=`${n}=; Max-Age=0; path=/; domain=.${parts.slice(i).join('.')}`;
+  });
+}
+function initConsent(){
+  const banner=$('#consentBanner'),id=banner?.dataset.ga4Id||'';
+  if(!banner||!/^G-[A-Z0-9]{4,15}$/.test(id))return;
+  const root=document.documentElement,current=$('#consentCurrent'),settingsBtn=$('#cookieSettings');
+  const stored=()=>{try{const v=localStorage.getItem(CONSENT_KEY);return v==='granted'||v==='denied'?v:''}catch{return ''}};
+  let returnFocus=null;
+  const reserve=()=>{if(!banner.hidden)root.style.setProperty('--consent-h',banner.offsetHeight+'px')};
+  const show=focus=>{
+    const state=stored();
+    if(current){current.hidden=!state;current.textContent=state?`اختيارك الحالي: ${state==='granted'?'قبول':'رفض'}.`:''}
+    banner.hidden=false;root.classList.add('has-consent');reserve();
+    if(focus)$('#consentAccept')?.focus();
+  };
+  const hide=()=>{banner.hidden=true;root.classList.remove('has-consent');root.style.removeProperty('--consent-h');if(returnFocus&&returnFocus.isConnected)returnFocus.focus();returnFocus=null};
+  const choose=value=>{
+    try{localStorage.setItem(CONSENT_KEY,value)}catch{}
+    if(value==='granted')loadAnalytics(id);else revokeAnalytics(id);
+    hide();toast(value==='granted'?'تم حفظ اختيارك: قبول الإحصاءات.':'تم حفظ اختيارك: لن تُحمَّل أدوات Google Analytics.');
+  };
+  on($('#consentAccept'),'click',()=>choose('granted'));
+  on($('#consentReject'),'click',()=>choose('denied'));
+  if(settingsBtn){settingsBtn.hidden=false;on(settingsBtn,'click',e=>{returnFocus=e.currentTarget;show(true)})}
+  addEventListener('resize',reserve,{passive:true});
+  const state=stored();
+  if(state==='granted')loadAnalytics(id);else if(!state)show(false);
+}
 setText('#year',new Date().getFullYear());const adminBar=$('#adminBar');if(adminBar&&isAdmin())adminBar.hidden=false;
+try{initConsent()}catch(error){console.info('Consent banner unavailable.',error)} // never blocks the storefront
 markNav();initSearch();initProductPage();initContactForm();renderProducts();renderCart();if(showFavorites)syncSearchUrl();loadLiveCatalog();
 if('serviceWorker' in navigator&&!/AlfakhamahApp\//.test(navigator.userAgent))window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));
 

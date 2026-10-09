@@ -527,6 +527,37 @@ def fill_home_faq(document: str) -> str:
     return _swap(document, FAQ_START, FAQ_END, render_faq_items())
 
 
+CONSENT_START, CONSENT_END = "<!--consent:start-->", "<!--consent:end-->"
+COOKIE_SETTINGS_MARK = "<!--cookie-settings-->"
+COOKIE_SETTINGS_LABEL = "إعدادات ملفات التعريف"
+
+
+def consent_banner(ga4_id: str) -> str:
+    """Consent banner for the optional Google Analytics 4 (only rendered when the owner set a measurement ID).
+    Hidden until the storefront script finds no stored choice; nothing from Google loads before «قبول»."""
+    return (f'<section class="consent-banner" id="consentBanner" role="region" aria-labelledby="consentTitle" '
+            f'aria-describedby="consentText" data-ga4-id="{esc(ga4_id)}" hidden>'
+            '<div class="container consent-inner"><div class="consent-copy">'
+            '<h2 id="consentTitle">ملفات تعريف الارتباط والإحصاءات</h2>'
+            '<p id="consentText">نودّ استخدام Google Analytics لقياس الزيارات ومعرفة الصفحات الأكثر تصفحًا كي نحسّن المتجر. '
+            'لا يُحمَّل إلا إذا ضغطت «قبول»، ويمكنك تغيير اختيارك في أي وقت من «' + COOKIE_SETTINGS_LABEL + '» أسفل الصفحة. '
+            'التفاصيل في <a href="/privacy">سياسة الخصوصية</a>.</p>'
+            '<p class="consent-current" id="consentCurrent" hidden></p></div>'
+            '<div class="consent-actions" role="group" aria-label="اختيارك لملفات تعريف الارتباط">'
+            '<button type="button" class="btn consent-btn" id="consentAccept">قبول</button>'
+            '<button type="button" class="btn consent-btn" id="consentReject">رفض</button></div></div></section>')
+
+
+def fill_consent(document: str, ga4_id: str) -> str:
+    """With a GA4 ID: the consent banner and the footer «إعدادات ملفات التعريف» button. Without one: neither
+    (the page stays exactly as before: no banner, no Google requests, the same CSP)."""
+    out = _swap(document, CONSENT_START, CONSENT_END, consent_banner(ga4_id) if ga4_id else "")
+    if COOKIE_SETTINGS_MARK not in out:
+        raise RuntimeError(f"index.html is missing the {COOKIE_SETTINGS_MARK} marker the server fills")
+    button = f'<button type="button" class="cookie-settings" id="cookieSettings" hidden>{COOKIE_SETTINGS_LABEL}</button>' if ga4_id else ""
+    return out.replace(COOKIE_SETTINGS_MARK, button, 1)
+
+
 def fill_shell(document: str, main: str, page: str, attrs: dict | None = None, *, nav_path: str = "", search: str = "") -> str:
     """Put a sub-page into the storefront shell: its <main> content, <body data-page …>, the page stylesheet,
     aria-current on the matching main-nav link and (for /products?q=) the header search value."""

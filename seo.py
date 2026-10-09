@@ -12,10 +12,31 @@ import re
 from urllib.parse import quote
 
 SITE_NAME_FALLBACK = "الفخامة للأقمشة والستائر"
+# Google settings the owner may fill in (Settings → "جوجل والتحليلات"). Validated on save AND again before every use,
+# so a value that slipped into the shared database some other way can never reach a page, an attribute or the CSP.
+GA4_ID_RE = re.compile(r"G-[A-Z0-9]{4,15}")
+SITE_VERIFICATION_RE = re.compile(r"[A-Za-z0-9_-]{10,120}")
 
 
 def esc(value: object) -> str:
     return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def ga4_id(settings: dict) -> str:
+    """The Google Analytics 4 measurement ID (G-XXXX) when the owner set a valid one, else ''."""
+    value = str(settings.get("ga4_id") or "").strip()
+    return value if GA4_ID_RE.fullmatch(value) else ""
+
+
+def site_verification(settings: dict) -> str:
+    """The Google Search Console HTML-tag token when set and valid, else ''."""
+    value = str(settings.get("google_site_verification") or "").strip()
+    return value if SITE_VERIFICATION_RE.fullmatch(value) else ""
+
+
+def verification_meta(settings: dict) -> str:
+    token = site_verification(settings)
+    return f'<meta name="google-site-verification" content="{esc(token)}">' if token else ""
 
 
 def absolute(base: str, path: str) -> str:
@@ -188,8 +209,10 @@ _REPLACEMENTS = (
 
 
 def render_page(template: str, *, title: str, description: str, robots: str, canonical: str, og_url: str, og_image: str,
-                og_type: str, schemas: list[dict], site_name: str, preload_image: str = "", image_alt: str = "") -> str:
-    """Write the page-specific <head> into the shared index.html template."""
+                og_type: str, schemas: list[dict], site_name: str, preload_image: str = "", image_alt: str = "",
+                verification: str = "") -> str:
+    """Write the page-specific <head> into the shared index.html template.
+    verification = the Search Console token (already validated, see site_verification()); '' adds nothing."""
     values = {"title": title, "description": description, "robots": robots, "og_title": title, "og_description": description,
               "og_image": og_image, "og_url": og_url, "canonical": canonical}
     out = template
@@ -213,6 +236,7 @@ def render_page(template: str, *, title: str, description: str, robots: str, can
         f'<link rel="alternate" hreflang="ar-SA" href="{esc(canonical)}">' if canonical else "",
         f'<link rel="alternate" hreflang="x-default" href="{esc(canonical)}">' if canonical else "",
         f'<link rel="preload" as="image" href="{esc(preload_image)}" fetchpriority="high">' if preload_image else "",
+        f'<meta name="google-site-verification" content="{esc(verification)}">' if verification else "",
     ]
     return out.replace("</head>", "  " + "\n  ".join(e for e in extra if e) + "\n</head>", 1)
 

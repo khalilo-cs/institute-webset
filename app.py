@@ -13,14 +13,18 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import signal
+import socket
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import traceback
 import unicodedata
 import uuid
+import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.utils import formatdate
@@ -111,14 +115,34 @@ DEFAULT_SHARE_IMAGE = "/assets/wavy-11.jpg"
 COMPRESSIBLE = ("text/", "application/json", "application/javascript", "application/manifest+json", "application/xml", "image/svg+xml")
 LOG_JSON = os.environ.get("LOG_FORMAT", "") == "json"
 IDEMPOTENCY_TTL = 600
+AUTO_BACKUP = os.environ.get("AUTO_BACKUP", "") == "1"
+BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", "14"))
+BACKUP_DIR = DATA_DIR / "backups"
+BACKUP_FORMAT = 1                          # manifest.json "format" of the zip written by write_backup_zip()
+BACKUP_APP = "fakhama-store"
+# The tables a restorable backup must contain (older databases are upgraded by init_db() on the next start).
+REQUIRED_TABLES = {"settings", "admins", "categories", "products", "orders", "order_items"}
+MAX_RESTORE_BYTES = 20 * 1024 ** 3         # refuse archives that would unpack to more than this (zip bombs)
+# First-party statistics: daily totals only. No cookies, no IP address, no user agent, no visitor identifiers.
+ANALYTICS_KEEP_DAYS = 400
+ANALYTICS_REFERRERS_PER_DAY = 200          # distinct referring hosts per day; the rest are counted as "other"
+SHOP_TZ = timezone(timedelta(hours=3))     # Asia/Riyadh (UTC+3 all year): the shop's calendar day for statistics
+BOT_UA_RE = re.compile(r"bot|crawl|spider|slurp|facebookexternalhit|whatsapp|preview", re.I)
+REFERRER_HOST_RE = re.compile(r"(?=.{3,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
+# Google Analytics 4 hosts (Google's documented CSP for GA4), added only to public storefront pages and only once the
+# owner set a measurement ID. The admin panel never gets them.
+GA_SCRIPT_SRC = "https://www.googletagmanager.com"
+GA_CONNECT_SRC = "https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com"
 
 
-def build_csp(nonce: str, secure: bool) -> str:
+def build_csp(nonce: str, secure: bool, analytics: bool = False) -> str:
     """No 'unsafe-inline' for scripts or <style> blocks: only our own files and tags carrying this response's nonce.
-    Style *attributes* (style="...") stay allowed; they cannot run code."""
-    parts = ["default-src 'self'", "img-src 'self' data:", f"style-src 'self' 'nonce-{nonce}'", "style-src-attr 'unsafe-inline'",
-             f"script-src 'self' 'nonce-{nonce}'", "connect-src 'self'", "manifest-src 'self'", "worker-src 'self'",
-             "object-src 'none'", "base-uri 'self'", "form-action 'self'", "frame-ancestors 'none'"]
+    Style *attributes* (style="...") stay allowed; they cannot run code.
+    analytics=True (storefront pages with a GA4 ID only) also allows gtag.js and its collection endpoints."""
+    google = f" {GA_CONNECT_SRC}" if analytics else ""
+    parts = ["default-src 'self'", f"img-src 'self' data:{google}", f"style-src 'self' 'nonce-{nonce}'", "style-src-attr 'unsafe-inline'",
+             f"script-src 'self' 'nonce-{nonce}'" + (f" {GA_SCRIPT_SRC}" if analytics else ""), f"connect-src 'self'{google}",
+             "manifest-src 'self'", "worker-src 'self'", "object-src 'none'", "base-uri 'self'", "form-action 'self'", "frame-ancestors 'none'"]
     if secure:
         parts.append("upgrade-insecure-requests")
     return "; ".join(parts)
@@ -184,6 +208,9 @@ DEFAULT_SETTINGS = {
                    "نفصّل الستائر حسب مقاس نافذتك، ونوفّر ستائر رول وشرائح معدنية وستائر كهربائية، إلى جانب أقمشة الستائر.\n\n"
                    "قبل بدء التفصيل نؤكد معك المقاسات ونوع القماش والسعر النهائي، لتكون الصورة واضحة قبل اعتماد الطلب."),
     "opening_hours": "",
+    # Optional Google services owned by the shop's own Google account (Settings → "جوجل والتحليلات"); empty = off.
+    "ga4_id": "",
+    "google_site_verification": "",
 }
 ORDER_STATUSES = {
     "new": "جديد",
@@ -339,6 +366,19 @@ def init_db() -> str | None:
             unit_price INTEGER NOT NULL,
             quantity INTEGER NOT NULL
           );
+          -- first-party statistics: one row per shop-local day and page / referring host, nothing about the visitor
+          CREATE TABLE IF NOT EXISTS page_views (
+            day TEXT NOT NULL,
+            path TEXT NOT NULL,
+            views INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (day, path)
+          ) WITHOUT ROWID;
+          CREATE TABLE IF NOT EXISTS referrers (
+            day TEXT NOT NULL,
+            host TEXT NOT NULL,
+            views INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (day, host)
+          ) WITHOUT ROWID;
         """)
         for table, column, ddl in (("categories", "image", "TEXT NOT NULL DEFAULT ''"),
                                    ("categories", "description", "TEXT NOT NULL DEFAULT ''"),
@@ -388,7 +428,72 @@ def init_db() -> str | None:
                 raise RuntimeError(f"ADMIN_PASSWORD must be at least {MIN_PASSWORD} characters")
             conn.execute("INSERT INTO admins(username,password_hash,updated_at) VALUES(?,?,?)",
                          (username, hash_password(password), now_iso()))
+        prune_analytics(conn)
     return generated_password
+
+
+# -- first-party statistics -------------------------------------------------------------------------------------------
+def shop_today(now: datetime | None = None):
+    """The shop's calendar date (Jeddah time) - statistics days follow the owner's day, not UTC."""
+    return (now or datetime.now(timezone.utc)).astimezone(SHOP_TZ).date()
+
+
+def prune_analytics(conn: sqlite3.Connection, now: datetime | None = None) -> None:
+    """Keep ANALYTICS_KEEP_DAYS days of statistics (run at startup and by the daily maintenance loop)."""
+    cutoff = (shop_today(now) - timedelta(days=ANALYTICS_KEEP_DAYS - 1)).isoformat()
+    conn.execute("DELETE FROM page_views WHERE day < ?", (cutoff,))
+    conn.execute("DELETE FROM referrers WHERE day < ?", (cutoff,))
+
+
+def record_page_view(path: str, referrer: str | None) -> None:
+    """Add one view of `path` to today's totals (UPSERT), and one entry for the referring host if there is one."""
+    day = shop_today().isoformat()
+    with connect_db() as conn:
+        conn.execute("PRAGMA synchronous = NORMAL")  # WAL + NORMAL: a cheap commit; a power cut may lose the last few counts
+        conn.execute("INSERT INTO page_views(day,path,views) VALUES(?,?,1) ON CONFLICT(day,path) DO UPDATE SET views=views+1",
+                     (day, path[:300]))
+        if referrer:
+            # A forged Referer cannot grow the table without bound: past the daily cap new hosts are pooled as "other".
+            if not conn.execute("SELECT 1 FROM referrers WHERE day=? AND host=?", (day, referrer)).fetchone() and \
+                    conn.execute("SELECT COUNT(*) FROM referrers WHERE day=?", (day,)).fetchone()[0] >= ANALYTICS_REFERRERS_PER_DAY:
+                referrer = "other"
+            conn.execute("INSERT INTO referrers(day,host,views) VALUES(?,?,1) ON CONFLICT(day,host) DO UPDATE SET views=views+1",
+                         (day, referrer))
+
+
+def analytics_report(days: int, now: datetime | None = None) -> dict:
+    """GET /api/admin/analytics: daily series for `days` days (oldest first, zero-filled), totals for today / 7 / 30 days,
+    top pages, top products and referring hosts over the period, plus orders and contact messages of the last 30 days."""
+    now = now or datetime.now(timezone.utc)
+    today = shop_today(now)
+    first = lambda n: (today - timedelta(days=n - 1)).isoformat()  # noqa: E731 - first day of an n-day window ending today
+    start = first(days)
+    with connect_db() as conn:
+        per_day = {r["day"]: r["v"] for r in conn.execute(
+            "SELECT day, SUM(views) AS v FROM page_views WHERE day>=? AND day<=? GROUP BY day", (first(max(days, 30)), today.isoformat()))}
+        top_pages = [{"path": r["path"], "views": r["v"]} for r in conn.execute(
+            "SELECT path, SUM(views) AS v FROM page_views WHERE day>=? AND day<=? GROUP BY path ORDER BY v DESC, path LIMIT 10",
+            (start, today.isoformat()))]
+        top_products = []
+        for r in conn.execute("SELECT path, SUM(views) AS v FROM page_views WHERE day>=? AND day<=? AND path LIKE '/product/%' "
+                              "GROUP BY path ORDER BY v DESC, path LIMIT 10", (start, today.isoformat())).fetchall():
+            slug = unquote(r["path"][len("/product/"):])
+            row = conn.execute("SELECT name FROM products WHERE slug=?", (slug,)).fetchone()
+            top_products.append({"slug": slug, "name": row["name"] if row else "", "views": r["v"]})
+        referrers = [{"host": r["host"], "views": r["v"]} for r in conn.execute(
+            "SELECT host, SUM(views) AS v FROM referrers WHERE day>=? AND day<=? GROUP BY host ORDER BY v DESC, host LIMIT 10",
+            (start, today.isoformat()))]
+        since = (now - timedelta(days=30)).astimezone(timezone.utc).isoformat(timespec="seconds")
+        orders_last30 = conn.execute("SELECT COUNT(*) FROM orders WHERE created_at >= ?", (since,)).fetchone()[0]
+        contact_last30 = conn.execute("SELECT COUNT(*) FROM messages WHERE created_at >= ?", (since,)).fetchone()[0]
+    daily = [{"date": (today - timedelta(days=offset)).isoformat(), "views": per_day.get((today - timedelta(days=offset)).isoformat(), 0)}
+             for offset in range(days - 1, -1, -1)]
+    return {"days": days, "timezone": "Asia/Riyadh", "daily": daily, "period_views": sum(d["views"] for d in daily),
+            "totals": {"today": per_day.get(today.isoformat(), 0),
+                       "last7": sum(v for d, v in per_day.items() if d >= first(7)),
+                       "last30": sum(v for d, v in per_day.items() if d >= first(30))},
+            "top_pages": top_pages, "top_products": top_products, "referrers": referrers,
+            "orders_last30": orders_last30, "contact_last30": contact_last30}
 
 
 def get_settings(conn: sqlite3.Connection) -> dict:
@@ -566,6 +671,28 @@ def clean_message(data: dict) -> dict:
     return {"name": name, "phone": ("+" if raw_phone.startswith("+") else "") + digits, "email": email, "message": message, "page": page}
 
 
+def clean_google_settings(data: dict) -> dict:
+    """ga4_id / google_site_verification from a settings update: '' (switch off) or a valid value, else APIError 400.
+    A pasted Search Console tag (<meta name="google-site-verification" content="…">) or DNS-style
+    "google-site-verification=…" is reduced to its token."""
+    result = {}
+    if "ga4_id" in data:
+        value = str(data["ga4_id"] or "").strip().upper()
+        if value and not seo.GA4_ID_RE.fullmatch(value):
+            raise APIError("معرّف القياس في Google Analytics 4 غير صالح؛ يبدأ بـ G- ويليه من 4 إلى 15 حرفًا أو رقمًا إنجليزيًا (مثال: G-AB12CD34EF).")
+        result["ga4_id"] = value
+    if "google_site_verification" in data:
+        value = str(data["google_site_verification"] or "").strip()
+        tag = re.search(r"""content\s*=\s*["']([^"']*)["']""", value, re.I)
+        if tag:
+            value = tag.group(1).strip()
+        value = re.sub(r"^google-site-verification\s*[=:]\s*", "", value, flags=re.I)
+        if value and not seo.SITE_VERIFICATION_RE.fullmatch(value):
+            raise APIError("رمز التحقق من Google Search Console غير صالح؛ الصق قيمة content من وسم HTML (حروف وأرقام إنجليزية و- و_ فقط).")
+        result["google_site_verification"] = value
+    return result
+
+
 SESSIONS: dict[str, dict] = {}
 LOGIN_FAILURES: dict[str, list[float]] = {}
 ORDER_ATTEMPTS: dict[str, list[float]] = {}
@@ -638,7 +765,8 @@ class StoreHandler(BaseHTTPRequestHandler):
             host = f"localhost:{PORT}"
         return f"{'https' if self.is_secure() else 'http'}://{host}"
 
-    def _send(self, status: int, body: bytes, content_type: str = "application/json; charset=utf-8", headers: dict | None = None, nonce: str | None = None) -> None:
+    def base_headers(self, content_type: str, nonce: str | None = None, analytics: bool = False) -> dict:
+        """Security and caching headers every response carries (callers may override some, e.g. Cache-Control)."""
         path = urlsplit(self.path).path
         out = {
             "Content-Type": content_type,
@@ -653,11 +781,17 @@ class StoreHandler(BaseHTTPRequestHandler):
             "Connection": "close",
         }
         if content_type.startswith("text/html") and nonce:
-            out["Content-Security-Policy"] = build_csp(nonce, self.is_secure())
+            # Google Analytics hosts only ever on storefront pages, never on the admin panel.
+            out["Content-Security-Policy"] = build_csp(nonce, self.is_secure(), analytics and not path.startswith(("/admin", "/api/")))
         if path.startswith(("/admin", "/api/admin")):
             out["X-Robots-Tag"] = "noindex, nofollow"
         if self.is_secure():
             out["Strict-Transport-Security"] = "max-age=15552000"
+        return out
+
+    def _send(self, status: int, body: bytes, content_type: str = "application/json; charset=utf-8", headers: dict | None = None,
+              nonce: str | None = None, analytics: bool = False) -> None:
+        out = self.base_headers(content_type, nonce, analytics)
         out.update(headers or {})  # callers may override, e.g. Cache-Control for static files
         mime = content_type.split(";")[0].strip()
         compressible = mime.startswith(COMPRESSIBLE)
@@ -685,6 +819,20 @@ class StoreHandler(BaseHTTPRequestHandler):
         if self.command != "HEAD" and status != 304:
             self.wfile.write(body)
 
+    def send_file(self, file: Path, content_type: str, headers: dict | None = None) -> None:
+        """Stream a (possibly large) file from disk in chunks instead of holding it in memory (backup archives)."""
+        out = self.base_headers(content_type)
+        out.update(headers or {})
+        out["Content-Length"] = str(file.stat().st_size)
+        self.status_sent = 200
+        self.send_response(200)
+        for key, value in out.items():
+            self.send_header(key, value)
+        self.end_headers()
+        if self.command != "HEAD":
+            with file.open("rb") as handle:
+                shutil.copyfileobj(handle, self.wfile, 256 * 1024)
+
     def send_json(self, data, status: int = 200, headers: dict | None = None, revalidate: bool = False) -> None:
         body = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         extra = dict(headers or {})
@@ -693,11 +841,61 @@ class StoreHandler(BaseHTTPRequestHandler):
             extra.setdefault("Cache-Control", "no-cache")
         self._send(status, body, "application/json; charset=utf-8", extra)
 
-    def render_html(self, markup: str, status: int = 200, headers: dict | None = None) -> None:
-        """Send an HTML page whose <script>/<style> tags carry a fresh CSP nonce (no 'unsafe-inline')."""
+    def render_html(self, markup: str, status: int = 200, headers: dict | None = None, analytics: bool = False) -> None:
+        """Send an HTML page whose <script>/<style> tags carry a fresh CSP nonce (no 'unsafe-inline').
+        analytics=True: a storefront page of a shop with a GA4 ID (its CSP also allows Google Analytics)."""
         nonce = secrets.token_urlsafe(16)
         markup = re.sub(r"<(script|style)(?![^>]*\bnonce=)", lambda m: f'<{m.group(1)} nonce="{nonce}"', markup)
-        self._send(status, markup.encode("utf-8"), "text/html; charset=utf-8", {"Cache-Control": "no-cache", **(headers or {})}, nonce=nonce)
+        self._send(status, markup.encode("utf-8"), "text/html; charset=utf-8", {"Cache-Control": "no-cache", **(headers or {})},
+                   nonce=nonce, analytics=analytics)
+
+    def storefront_ga4(self, settings: dict) -> str:
+        """The GA4 ID for a storefront page; '' under /admin and /api (e.g. a branded 404 there), whose CSP is never widened."""
+        return "" if urlsplit(self.path).path.startswith(("/admin", "/api/")) else seo.ga4_id(settings)
+
+    # -- first-party statistics ------------------------------------------------------------------------------------
+    def is_admin_visitor(self) -> bool:
+        """A signed-in admin (or a browser that still carries the admin marker cookie) is not a customer visit."""
+        if self.get_session()[1]:
+            return True
+        return bool(re.search(r"(?:^|;\s*)fakhama_admin_flag=1(?:;|$)", self.headers.get("Cookie", "")))
+
+    def referrer_host(self) -> str | None:
+        """'direct' without a usable Referer, the referring site's host name (no path, no query) when it is another
+        site, None when the visitor came from one of our own pages."""
+        raw = self.headers.get("Referer", "").strip()
+        if not raw:
+            return "direct"
+        try:
+            host = (urlsplit(raw).hostname or "").lower().rstrip(".")
+        except ValueError:
+            return "direct"
+        if not host:
+            return "direct"
+        own = {(urlsplit(PUBLIC_BASE_URL).hostname or "") if PUBLIC_BASE_URL else "", (self.headers.get("Host", "").rsplit(":", 1)[0]).lower()}
+        own = {h.removeprefix("www.") for h in own if h}
+        if host.removeprefix("www.") in own:
+            return None
+        host = host.removeprefix("www.")
+        return host if REFERRER_HOST_RE.fullmatch(host) else "direct"
+
+    def count_page_view(self, path: str) -> None:
+        """Count one GET of a public page that is about to be answered with 200 (called once the page is built, just
+        before it is sent, so the total is already stored when the visitor gets the page). Skipped: HEAD, link prefetch/prerender,
+        obvious bots and link-preview fetchers, empty user agents and the shop's own admin. Stores daily totals only:
+        never an IP address, user agent, cookie or anything else about the visitor."""
+        if self.command != "GET":
+            return
+        purpose = " ".join(self.headers.get(h, "") for h in ("Sec-Purpose", "Purpose", "X-Purpose", "X-Moz")).lower()
+        if "prefetch" in purpose or "preview" in purpose:
+            return
+        agent = self.headers.get("User-Agent", "")
+        if not agent.strip() or BOT_UA_RE.search(agent) or self.is_admin_visitor():
+            return
+        try:
+            record_page_view(path, self.referrer_host())
+        except Exception:
+            traceback.print_exc()  # statistics must never break a page
 
     def read_json(self, limit: int | None = None) -> dict:
         try:
@@ -925,8 +1123,11 @@ class StoreHandler(BaseHTTPRequestHandler):
             canonical=(base + "/") if ready else "", og_url=base + "/" if ready else "",
             og_image=seo.absolute(base, DEFAULT_SHARE_IMAGE), og_type="website",
             schemas=[seo.store_schema(settings, base, ready, DEFAULT_SHARE_IMAGE), seo.website_schema(settings, base)],
-            site_name=store, preload_image=DEFAULT_SHARE_IMAGE, image_alt=store)
-        self.render_html(pages.fill_home_faq(page))
+            site_name=store, preload_image=DEFAULT_SHARE_IMAGE, image_alt=store, verification=seo.site_verification(settings))
+        ga4 = self.storefront_ga4(settings)
+        markup = pages.fill_consent(pages.fill_home_faq(page), ga4)
+        self.count_page_view("/")
+        self.render_html(markup, analytics=bool(ga4))
 
     def render_page(self, settings: dict, *, page: str, main: str, path: str, meta: tuple[str, str], schemas: list[dict],
                     status: int = 200, attrs: dict | None = None, image: str = "", image_alt: str = "", og_type: str = "website",
@@ -942,9 +1143,14 @@ class StoreHandler(BaseHTTPRequestHandler):
             robots="index,follow,max-image-preview:large" if indexable else "noindex,nofollow",
             canonical=(base + path) if indexable else "", og_url=(base + path) if status == 200 and path else "",
             og_image=seo.absolute(base, image or DEFAULT_SHARE_IMAGE), og_type=og_type, schemas=schemas,
-            site_name=settings.get("store_name") or seo.SITE_NAME_FALLBACK, preload_image=preload, image_alt=image_alt or title)
+            site_name=settings.get("store_name") or seo.SITE_NAME_FALLBACK, preload_image=preload, image_alt=image_alt or title,
+            verification=seo.site_verification(settings))
         nav_path = path if page in ("products", "categories", "about", "contact", "faq") else ""
-        self.render_html(pages.fill_shell(document, main, page, attrs, nav_path=nav_path, search=search), status, headers)
+        ga4 = self.storefront_ga4(settings)
+        markup = pages.fill_consent(pages.fill_shell(document, main, page, attrs, nav_path=nav_path, search=search), ga4)
+        if status == 200 and path:
+            self.count_page_view(path)  # the page's own path: no query string (a search term never reaches the statistics)
+        self.render_html(markup, status, headers, analytics=bool(ga4))
 
     def serve_not_found(self, kind: str = "page") -> None:
         """Branded 404 (HTTP 404, noindex) for unknown pages, products and categories."""
@@ -1085,7 +1291,10 @@ class StoreHandler(BaseHTTPRequestHandler):
             return (self.serve_category if page_match.group(1) == "category" else self.serve_product)(page_match.group(2))
         if path in legal.PAGES:
             with connect_db() as conn:
-                return self.render_html(legal.render(path, get_settings(conn)))
+                settings = get_settings(conn)
+            markup = legal.render(path, settings)
+            self.count_page_view(path)
+            return self.render_html(markup)
         if path in ("/admin", "/admin/", "/admin.html"):
             return self.render_html((BASE_DIR / "admin.html").read_text(encoding="utf-8"))
         if path == "/offline.html":
@@ -1359,11 +1568,14 @@ class StoreHandler(BaseHTTPRequestHandler):
                 # These values end up in href attributes on the storefront; allow web links only (no javascript: etc.).
                 if str(data.get(url_key, "")).strip() and not re.match(r"https?://[^\s]+$", str(data[url_key]).strip(), re.I):
                     raise APIError("الروابط يجب أن تبدأ بـ https:// أو http://")
+            google = clean_google_settings(data)
             with connect_db() as conn:
                 for key, limit in allowed.items():
                     if key in data:
                         val = str(data[key]).strip()[:limit]
                         conn.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, val))
+                for key, val in google.items():
+                    conn.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, val))
                 if "site_ready" in data:
                     ready = "1" if data["site_ready"] else "0"
                     conn.execute("INSERT INTO settings(key,value) VALUES('site_ready',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (ready,))
@@ -1589,6 +1801,27 @@ class StoreHandler(BaseHTTPRequestHandler):
                     if not self.require_admin(): return
                     with connect_db() as conn: settings = get_settings(conn)
                     self.send_json({"settings": settings}); return
+                if path == "/api/admin/analytics":
+                    if not self.require_admin(): return
+                    days = (parse_qs(parsed.query).get("days") or ["30"])[0]
+                    if days not in ("7", "30", "90"): raise APIError("الفترة غير مدعومة؛ اختر 7 أو 30 أو 90 يومًا.")
+                    self.send_json(analytics_report(int(days))); return
+                if path == "/api/admin/backups":
+                    if not self.require_admin(): return
+                    self.send_json({"backups": list_backups(), "auto_backup": AUTO_BACKUP, "keep": BACKUP_KEEP}); return
+                if path == "/api/admin/backup.zip":
+                    session = self.require_admin()
+                    if not session: return
+                    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                    name = f"fakhama-backup-{stamp}.zip"
+                    with tempfile.TemporaryDirectory(prefix=".download-", dir=DATA_DIR) as tmp:
+                        archive = Path(tmp) / name
+                        manifest = write_backup_zip(archive)
+                        self.log_admin(session["username"], "backup_download",
+                                       f"{name}: {archive.stat().st_size} bytes, {sum(manifest['tables'].values())} rows, {manifest['uploads']} uploads")
+                        self.send_file(archive, "application/zip", {"Content-Disposition": f'attachment; filename="{name}"',
+                                                                    "Cache-Control": "no-store"})
+                    return
                 if path == "/api/admin/export/orders.csv":
                     if not self.require_admin(): return
                     self.export_orders(); return
@@ -1620,7 +1853,7 @@ def backup_data(keep: int = 14) -> list[Path]:
     """Consistent copy of the database (SQLite online-backup API, safe while the server runs) + a tarball of uploads/.
     Files go to DATA_DIR/backups; only the newest `keep` of each kind are retained."""
     import tarfile
-    target = DATA_DIR / "backups"
+    target = BACKUP_DIR
     target.mkdir(exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     db_copy = target / f"store-{stamp}.db"
@@ -1639,6 +1872,287 @@ def backup_data(keep: int = 14) -> list[Path]:
         for old in sorted(target.glob(pattern))[:-max(1, keep)]:
             old.unlink(missing_ok=True)
     return [db_copy, tar_path]
+
+
+UPLOAD_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,200}")
+BACKUP_NAME_RE = re.compile(r"(?:store-\d{8}-\d{6}\.db|uploads-\d{8}-\d{6}\.tar\.gz|pre-restore-\d{8}-\d{6}\.zip)")
+
+
+def quote_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def table_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    names = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+    return {name: conn.execute(f"SELECT COUNT(*) FROM {quote_ident(name)}").fetchone()[0] for name in names}
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def snapshot_db(target: Path) -> dict[str, int]:
+    """Consistent single-file copy of store.db (online-backup API: safe while the server writes); returns row counts."""
+    source = sqlite3.connect(DB_PATH, timeout=20)
+    try:
+        dest = sqlite3.connect(target)
+        try:
+            source.backup(dest)
+            dest.execute("PRAGMA journal_mode=DELETE")  # self-contained file: no -wal/-shm companions needed
+            counts = table_counts(dest)
+        finally:
+            dest.close()
+    finally:
+        source.close()
+    return counts
+
+
+def upload_files() -> list[Path]:
+    """Uploaded photos in uploads/ (regular files with a plain name; never dotfiles or links)."""
+    if not UPLOAD_DIR.is_dir():
+        return []
+    return sorted(f for f in UPLOAD_DIR.iterdir() if UPLOAD_NAME_RE.fullmatch(f.name) and f.is_file() and not f.is_symlink())
+
+
+def write_backup_zip(target: Path) -> dict:
+    """One self-contained archive at `target`: store.db (consistent copy), uploads/<files> and manifest.json
+    (app, format, version, UTC time, row count per table, uploads count, SHA-256 of store.db). Returns the manifest."""
+    with tempfile.TemporaryDirectory(prefix=".backup-", dir=DATA_DIR) as work:
+        db_copy = Path(work) / "store.db"
+        counts = snapshot_db(db_copy)
+        added = 0
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=6, strict_timestamps=False) as zf:
+            zf.write(db_copy, "store.db")
+            for file in upload_files():
+                try:
+                    zf.write(file, "uploads/" + file.name, compress_type=zipfile.ZIP_STORED)  # photos are compressed already
+                    added += 1
+                except FileNotFoundError:
+                    pass  # deleted by the admin while the archive was being written
+            manifest = {"app": BACKUP_APP, "format": BACKUP_FORMAT, "version": VERSION, "created_at": now_iso(),
+                        "tables": counts, "uploads": added, "store_db_sha256": sha256_file(db_copy),
+                        "note": "store.db includes the admins table (password hash, 2FA secret): keep this archive private."}
+            zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+    return manifest
+
+
+def list_backups(limit: int = 60) -> list[dict]:
+    """Archives on the server in DATA_DIR/backups (automatic daily copies, `app.py backup`, pre-restore safety copies)."""
+    if not BACKUP_DIR.is_dir():
+        return []
+    items = []
+    for file in BACKUP_DIR.iterdir():
+        if BACKUP_NAME_RE.fullmatch(file.name) and file.is_file():
+            stat = file.stat()
+            kind = "database" if file.name.endswith(".db") else "uploads" if file.name.endswith(".tar.gz") else "pre-restore"
+            items.append({"name": file.name, "kind": kind, "size": stat.st_size,
+                          "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds")})
+    items.sort(key=lambda item: (item["modified"], item["name"]), reverse=True)
+    return items[:limit]
+
+
+def export_sql(write) -> dict[str, int]:
+    """Plain-SQL dump (python3 app.py export-sql [OUT]): the schema of every table and the rows of every table EXCEPT
+    admins (password hash and 2FA secret stay out). Read from one snapshot. Returns the exported row counts."""
+    conn = sqlite3.connect(DB_PATH, timeout=20)
+    exported: dict[str, int] = {}
+    try:
+        conn.execute("BEGIN")  # one consistent read snapshot for the whole dump
+        tables = conn.execute("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
+        write(f"-- {BACKUP_APP} {VERSION} SQL export, {now_iso()}\n")
+        write("-- The admins table is exported WITHOUT rows (password hash, 2FA secret). After importing into a new store.db,\n"
+              "-- start app.py with ADMIN_PASSWORD set (12+ characters) to create the admin account.\n")
+        write("PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n")
+        for _name, sql in tables:
+            write(sql.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1) + ";\n")
+        for name, _sql in tables:
+            if name == "admins":
+                exported[name] = 0
+                continue
+            columns = [r[0] for r in conn.execute("SELECT name FROM pragma_table_info(?) ORDER BY cid", (name,))]
+            column_list = ",".join(quote_ident(c) for c in columns)
+            select = "SELECT " + ",".join(f"quote({quote_ident(c)})" for c in columns) + f" FROM {quote_ident(name)}"
+            count = 0
+            for row in conn.execute(select):
+                write(f"INSERT INTO {quote_ident(name)}({column_list}) VALUES({','.join(row)});\n")
+                count += 1
+            exported[name] = count
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_sequence'").fetchone():
+            sequences = conn.execute("SELECT quote(name), seq FROM sqlite_sequence WHERE name != 'admins' ORDER BY name").fetchall()
+            write('DELETE FROM "sqlite_sequence";\n')
+            for name, seq in sequences:
+                write(f'INSERT INTO "sqlite_sequence"(name,seq) VALUES({name},{int(seq)});\n')
+        for (sql,) in conn.execute("SELECT sql FROM sqlite_master WHERE type IN ('index','trigger','view') AND sql IS NOT NULL ORDER BY type, name"):
+            write(re.sub(r"^CREATE (UNIQUE INDEX|INDEX|TRIGGER|VIEW) (?!IF NOT EXISTS)", r"CREATE \1 IF NOT EXISTS ", sql) + ";\n")
+        write("COMMIT;\n")
+        conn.rollback()
+    finally:
+        conn.close()
+    return exported
+
+
+class RestoreError(Exception):
+    """The archive cannot be validated or restored; nothing has been changed."""
+
+
+def validate_backup_zip(archive: Path, work: Path) -> dict:
+    """Check a backup archive completely before anything is touched and unpack it into `work` (store.db + uploads/).
+    Refuses: not a zip, unexpected / unsafe member names, links, missing or foreign manifest, CRC errors, a store.db whose
+    checksum, integrity check, required tables or row counts do not match the manifest. Returns the manifest."""
+    if not archive.is_file() or not zipfile.is_zipfile(archive):
+        raise RestoreError("الملف غير موجود أو ليس أرشيف ZIP.")
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            infos = zf.infolist()
+            seen: set[str] = set()
+            total = 0
+            for info in infos:
+                name = info.filename
+                if info.is_dir():
+                    if name != "uploads/":
+                        raise RestoreError(f"مجلد غير متوقع في الأرشيف: {name!r}")
+                    continue
+                if not (name in ("store.db", "manifest.json") or (name.startswith("uploads/") and UPLOAD_NAME_RE.fullmatch(name[8:]))):
+                    raise RestoreError(f"عنصر غير متوقع أو اسم غير آمن في الأرشيف: {name!r}")
+                if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                    raise RestoreError(f"الأرشيف يحوي رابطًا رمزيًا: {name!r}")
+                if name in seen:
+                    raise RestoreError(f"عنصر مكرر في الأرشيف: {name!r}")
+                seen.add(name)
+                total += info.file_size
+            if not {"store.db", "manifest.json"} <= seen:
+                raise RestoreError("الأرشيف لا يحوي store.db و manifest.json؛ ليس نسخة احتياطية من هذا المتجر.")
+            if total > MAX_RESTORE_BYTES or zf.getinfo("manifest.json").file_size > 1024 * 1024:
+                raise RestoreError("حجم محتوى الأرشيف أكبر من المتوقع.")
+            broken = zf.testzip()
+            if broken:
+                raise RestoreError(f"الأرشيف تالف (فشل التحقق من {broken}).")
+            try:
+                manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise RestoreError("ملف manifest.json غير صالح.")
+            if not isinstance(manifest, dict) or manifest.get("app") != BACKUP_APP or not isinstance(manifest.get("tables"), dict) \
+                    or not isinstance(manifest.get("format"), int) or manifest["format"] > BACKUP_FORMAT:
+                raise RestoreError("manifest.json لا يخص نسخة احتياطية مدعومة من هذا المتجر.")
+            (work / "uploads").mkdir(parents=True, exist_ok=True)
+            uploads = 0
+            for name in sorted(seen - {"manifest.json"}):
+                target = work / ("store.db" if name == "store.db" else "uploads/" + name[8:])
+                with zf.open(name) as source, target.open("wb") as dest:
+                    shutil.copyfileobj(source, dest, 1024 * 1024)
+                uploads += name != "store.db"
+    except zipfile.BadZipFile as exc:
+        raise RestoreError(f"الأرشيف تالف: {exc}")
+    if manifest.get("uploads") != uploads:
+        raise RestoreError(f"عدد الصور في الأرشيف ({uploads}) لا يطابق manifest.json ({manifest.get('uploads')}).")
+    db = work / "store.db"
+    if manifest.get("store_db_sha256") and sha256_file(db) != manifest["store_db_sha256"]:
+        raise RestoreError("بصمة store.db لا تطابق manifest.json؛ الملف معدّل أو تالف.")
+    with db.open("rb") as handle:
+        if handle.read(16) != b"SQLite format 3\x00":
+            raise RestoreError("store.db في الأرشيف ليس قاعدة بيانات SQLite.")
+    try:
+        conn = sqlite3.connect(db)
+        try:
+            if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise RestoreError("فحص سلامة قاعدة البيانات في الأرشيف فشل.")
+            counts = table_counts(conn)
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as exc:
+        raise RestoreError(f"قاعدة البيانات في الأرشيف غير صالحة: {exc}")
+    missing = REQUIRED_TABLES - set(counts)
+    if missing:
+        raise RestoreError("قاعدة البيانات في الأرشيف تنقصها جداول: " + ", ".join(sorted(missing)))
+    for table, expected in manifest["tables"].items():
+        if counts.get(table) != expected:
+            raise RestoreError(f"عدد صفوف الجدول {table} ({counts.get(table)}) لا يطابق manifest.json ({expected}).")
+    return manifest
+
+
+def server_is_running() -> bool:
+    """Best effort: is something answering on this configuration's HOST:PORT (the store server, normally)?"""
+    host = "127.0.0.1" if HOST in ("", "0.0.0.0") else "::1" if HOST == "::" else HOST
+    try:
+        with socket.create_connection((host, PORT), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def restore_backup(archive: Path, force: bool = False) -> dict:
+    """python3 app.py restore <backup.zip> (server stopped): validate the archive completely, save the current state to
+    DATA_DIR/backups/pre-restore-<UTC time>.zip, then replace store.db and the contents of uploads/."""
+    if not force and server_is_running():
+        raise RestoreError(f"يبدو أن الخادم يعمل على {HOST}:{PORT}. أوقفه أولًا ثم أعد المحاولة "
+                           "(أو أضف --force إن كان ما يعمل على هذا المنفذ ليس هذا المتجر).")
+    with tempfile.TemporaryDirectory(prefix=".restore-", dir=DATA_DIR) as tmp:
+        work = Path(tmp)
+        manifest = validate_backup_zip(archive, work)
+        safety = None
+        if DB_PATH.exists():
+            BACKUP_DIR.mkdir(exist_ok=True)
+            safety = BACKUP_DIR / f"pre-restore-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.zip"
+            write_backup_zip(safety)
+        staged = DATA_DIR / ".store.db.restoring"
+        shutil.copyfile(work / "store.db", staged)
+        for suffix in ("-wal", "-shm", "-journal"):  # companions of the old database must not be replayed onto the new one
+            Path(str(DB_PATH) + suffix).unlink(missing_ok=True)
+        os.replace(staged, DB_PATH)
+        UPLOAD_DIR.mkdir(exist_ok=True)
+        restored = {f.name for f in (work / "uploads").iterdir()}
+        for file in (work / "uploads").iterdir():
+            shutil.copyfile(file, UPLOAD_DIR / file.name)
+        for file in upload_files():  # the folder may be a mount point: its contents are replaced, not the folder itself
+            if file.name not in restored:
+                file.unlink(missing_ok=True)
+    return {"manifest": manifest, "safety_copy": str(safety) if safety else "", "uploads": len(restored)}
+
+
+def run_cli(args: list[str]) -> int:
+    """`export-sql [OUT|-]` and `restore <backup.zip> [--force]`. Exit code 0 on success, 1 on failure, 2 on bad usage."""
+    command, rest = args[0], args[1:]
+    if command == "export-sql":
+        if len(rest) > 1:
+            print("الاستخدام: python3 app.py export-sql [OUT.sql]", file=sys.stderr)
+            return 2
+        if not DB_PATH.exists():
+            print(f"لا توجد قاعدة بيانات في {DB_PATH}", file=sys.stderr)
+            return 1
+        if not rest or rest[0] == "-":
+            out = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", newline="\n")
+            counts = export_sql(out.write)
+            out.flush()
+            out.detach()
+        else:
+            target = Path(rest[0]).expanduser()
+            with target.open("w", encoding="utf-8", newline="\n") as handle:
+                counts = export_sql(handle.write)
+            print(f"تم التصدير إلى {target} ({sum(counts.values())} صفًا، دون صفوف جدول admins).")
+        return 0
+    if command == "restore":
+        force = "--force" in rest
+        files = [a for a in rest if a != "--force"]
+        if len(files) != 1:
+            print("الاستخدام: python3 app.py restore <backup.zip> [--force]   (أوقف الخادم أولًا)", file=sys.stderr)
+            return 2
+        try:
+            result = restore_backup(Path(files[0]).expanduser(), force=force)
+        except RestoreError as exc:
+            print(f"لم تتم الاستعادة ولم يتغير شيء: {exc}", file=sys.stderr)
+            return 1
+        manifest = result["manifest"]
+        print(f"تمت الاستعادة من نسخة {manifest.get('created_at', '?')} (إصدار {manifest.get('version', '?')}): "
+              f"{sum(manifest['tables'].values())} صفًا و{result['uploads']} صورة.")
+        if result["safety_copy"]:
+            print(f"نسخة من الحالة السابقة: {result['safety_copy']}")
+        print("شغّل الخادم الآن (python3 app.py).")
+        return 0
+    return 2
 
 
 def sweep_orphan_uploads(min_age: int = 24 * 3600) -> int:
@@ -1660,6 +2174,8 @@ def start_auto_backup(keep: int) -> None:
             try:
                 backup_data(keep)
                 sweep_orphan_uploads()
+                with connect_db() as conn:
+                    prune_analytics(conn)
             except Exception:
                 traceback.print_exc()
             time.sleep(24 * 60 * 60)
@@ -1667,9 +2183,11 @@ def start_auto_backup(keep: int) -> None:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] in ("export-sql", "restore"):
+        sys.exit(run_cli(sys.argv[1:]))
     if len(sys.argv) > 1 and sys.argv[1] == "backup":
         init_db()
-        for path in backup_data(int(os.environ.get("BACKUP_KEEP", "14"))):
+        for path in backup_data(BACKUP_KEEP):
             print(path)
         sys.exit(0)
     first_run_password = init_db()
@@ -1679,8 +2197,8 @@ if __name__ == "__main__":
         traceback.print_exc()
     server = ThreadingHTTPServer((HOST, PORT), StoreHandler)
     server.daemon_threads = True
-    if os.environ.get("AUTO_BACKUP", "") == "1":
-        start_auto_backup(int(os.environ.get("BACKUP_KEEP", "14")))
+    if AUTO_BACKUP:
+        start_auto_backup(BACKUP_KEEP)
     # SIGTERM (docker stop, systemd) finishes in-flight requests and exits cleanly.
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
     print(f"\nموقع المتجر: http://{HOST}:{PORT}/")

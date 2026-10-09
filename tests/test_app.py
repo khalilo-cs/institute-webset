@@ -1718,5 +1718,651 @@ class LegacyDataMigrationTests(unittest.TestCase):
             ServerCase.stop_server.__func__(ServerCase)
 
 
+
+# -- first-party statistics, Google settings, backups --------------------------------------------------------------
+BROWSER_UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Mobile Safari/537.36"
+SHOP_TZ = __import__("datetime").timezone(__import__("datetime").timedelta(hours=3))
+
+
+def shop_day(offset: int = 0) -> str:
+    """The shop's calendar day (Jeddah, UTC+3) `offset` days ago, as stored in page_views.day."""
+    from datetime import datetime, timedelta
+    return (datetime.now(SHOP_TZ).date() - timedelta(days=offset)).isoformat()
+
+
+def db_rows(data_dir: str, sql: str, args=()) -> list[tuple]:
+    import sqlite3
+    conn = sqlite3.connect(Path(data_dir) / "store.db", timeout=20)
+    try:
+        return conn.execute(sql, args).fetchall()
+    finally:
+        conn.close()
+
+
+def db_exec(data_dir: str, sql: str, rows: list[tuple] | None = None) -> None:
+    import sqlite3
+    conn = sqlite3.connect(Path(data_dir) / "store.db", timeout=20)
+    try:
+        if rows is None:
+            conn.execute(sql)
+        else:
+            conn.executemany(sql, rows)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class AnalyticsCountingTests(ServerCase):
+    ENV = {"CONTACT_LIMIT_PER_10MIN": "1000"}
+
+    def counts(self) -> tuple[dict, dict]:
+        pages = dict(db_rows(self.data_dir, "SELECT path, SUM(views) FROM page_views GROUP BY path"))
+        refs = dict(db_rows(self.data_dir, "SELECT host, SUM(views) FROM referrers GROUP BY host"))
+        return pages, refs
+
+    def visit(self, path, method="GET", ua=BROWSER_UA, **headers):
+        hdrs = dict(headers)
+        if ua is not None:
+            hdrs["User-Agent"] = ua
+        return self.req(method, path, headers=hdrs)[0]
+
+    @staticmethod
+    def delta(before: dict, after: dict) -> dict:
+        return {k: after.get(k, 0) - before.get(k, 0) for k in set(before) | set(after) if after.get(k, 0) != before.get(k, 0)}
+
+    def test_successful_public_page_views_are_counted_once_per_page(self):
+        before, _ = self.counts()
+        visits = {"/": "/", "/index.html": "/", "/products": "/products", "/products?q=%D8%B3%D8%AA%D8%A7%D8%B1%D8%A9": "/products",
+                  "/categories": "/categories", "/category/curtains": "/category/curtains", "/product/wavy-03": "/product/wavy-03",
+                  "/about": "/about", "/contact": "/contact", "/faq": "/faq", "/privacy": "/privacy", "/terms": "/terms"}
+        expected: dict[str, int] = {}
+        for url, stored in visits.items():
+            self.assertEqual(self.visit(url), 200, url)
+            expected[stored] = expected.get(stored, 0) + 1
+        after, _ = self.counts()
+        self.assertEqual(self.delta(before, after), expected)
+        # the search term never reaches the statistics (only the page's own path is stored)
+        self.assertLessEqual({r[0] for r in db_rows(self.data_dir, "SELECT path FROM page_views")}, set(visits.values()))
+        self.assertEqual({r[0] for r in db_rows(self.data_dir, "SELECT day FROM page_views")}, {shop_day()})
+
+    def test_bots_prefetch_head_errors_assets_api_and_the_admin_are_not_counted(self):
+        cookie, _ = self.login()
+        before, refs_before = self.counts()
+        skipped = [
+            ("/", "HEAD", BROWSER_UA, {}),
+            ("/", "GET", BROWSER_UA, {"Sec-Purpose": "prefetch"}),
+            ("/products", "GET", BROWSER_UA, {"Sec-Purpose": "prefetch;prerender"}),
+            ("/", "GET", BROWSER_UA, {"Purpose": "prefetch"}),
+            ("/", "GET", BROWSER_UA, {"X-Moz": "prefetch"}),
+            ("/", "GET", "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", {}),
+            ("/", "GET", "Mozilla/5.0 (compatible; bingbot/2.0)", {}),
+            ("/", "GET", "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)", {}),
+            ("/product/wavy-03", "GET", "WhatsApp/2.23.20.0 A", {}),
+            ("/", "GET", "Mozilla/5.0 (compatible; Yahoo! Slurp)", {}),
+            ("/", "GET", "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; Google Page Speed Insights) Chrome/120 Preview", {}),
+            ("/", "GET", "SomeCrawler/1.0", {}),
+            ("/", "GET", "Baiduspider", {}),
+            ("/", "GET", None, {}),                      # no user agent at all
+            ("/", "GET", BROWSER_UA, {"Cookie": cookie}),  # the signed-in admin
+            ("/products", "GET", BROWSER_UA, {"Cookie": "fakhama_admin_flag=1"}),
+            ("/no-such-page", "GET", BROWSER_UA, {}),
+            ("/product/no-such-product", "GET", BROWSER_UA, {}),
+            ("/about/", "GET", BROWSER_UA, {}),         # 301 to /about
+            ("/api/products", "GET", BROWSER_UA, {}),
+            ("/api/store", "GET", BROWSER_UA, {}),
+            ("/assets/wavy-11.jpg", "GET", BROWSER_UA, {}),
+            ("/sw.js", "GET", BROWSER_UA, {}),
+            ("/robots.txt", "GET", BROWSER_UA, {}),
+            ("/offline.html", "GET", BROWSER_UA, {}),
+            ("/admin/", "GET", BROWSER_UA, {}),
+            ("/admin/", "GET", BROWSER_UA, {"Cookie": cookie}),
+        ]
+        for path, method, ua, headers in skipped:
+            self.visit(path, method, ua, **headers)
+        # the contact form posted without JavaScript answers with the contact page, but a POST is not a page view
+        body = "name=%D8%B3%D8%A7%D8%B1%D8%A9&phone=0551234567&message=%D8%A7%D8%B3%D8%AA%D9%81%D8%B3%D8%A7%D8%B1+%D8%B9%D9%86+%D8%A7%D9%84%D8%B3%D8%AA%D8%A7%D8%A6%D8%B1&consent=on"
+        status, _, _ = self.req("POST", "/api/contact", body.encode(), headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": BROWSER_UA})
+        self.assertEqual(status, 200)
+        after, refs_after = self.counts()
+        self.assertEqual(self.delta(before, after), {}, "nothing above is a customer page view")
+        self.assertEqual(self.delta(refs_before, refs_after), {})
+
+    def test_referrers_store_only_another_site_host_name(self):
+        _, before = self.counts()
+        host = f"127.0.0.1:{self.port}"
+        cases = [
+            ({}, "direct"),
+            ({"Referer": "https://www.google.com/search?q=private+words&client=x"}, "google.com"),
+            ({"Referer": "https://l.instagram.com/?u=https%3A%2F%2Fexample"}, "l.instagram.com"),
+            ({"Referer": "android-app://com.google.android.gm/"}, "com.google.android.gm"),
+            ({"Referer": "not a url at all"}, "direct"),
+            ({"Referer": f"http://{host}/products"}, None),                                  # moving between our own pages
+            ({"Referer": "https://shop.example.com/about", "Host": "shop.example.com"}, None),
+            ({"Referer": "https://www.shop.example.com/", "Host": "shop.example.com"}, None),
+        ]
+        expected: dict[str, int] = {}
+        for headers, stored in cases:
+            self.assertEqual(self.visit("/about", **headers), 200, headers)
+            if stored:
+                expected[stored] = expected.get(stored, 0) + 1
+        _, after = self.counts()
+        self.assertEqual(self.delta(before, after), expected)
+        stored_hosts = {r[0] for r in db_rows(self.data_dir, "SELECT host FROM referrers")}
+        self.assertFalse([h for h in stored_hosts if "/" in h or "?" in h or "private" in h], stored_hosts)
+
+    def test_forged_referrers_cannot_grow_the_table_without_bound(self):
+        today = shop_day()
+        db_exec(self.data_dir, "INSERT OR IGNORE INTO referrers(day,host,views) VALUES(?,?,1)", [(today, f"filler{i}.example") for i in range(200)])
+        _, before = self.counts()
+        self.assertEqual(self.visit("/faq", Referer="https://brand-new-site.example/x"), 200)
+        self.assertEqual(self.visit("/faq", Referer="https://filler7.example/"), 200)  # a host already counted today
+        _, after = self.counts()
+        self.assertEqual(self.delta(before, after), {"other": 1, "filler7.example": 1})
+        self.assertFalse(db_rows(self.data_dir, "SELECT 1 FROM referrers WHERE host='brand-new-site.example'"))
+        db_exec(self.data_dir, "DELETE FROM referrers WHERE host LIKE 'filler%' OR host='other'")  # other tests use today's rows
+
+    def test_no_visitor_data_is_stored(self):
+        self.visit("/", Referer="https://www.google.com/", Cookie="tracking=abc")
+        tables = {r[0] for r in db_rows(self.data_dir, "SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in ("page_views", "referrers"):
+            self.assertIn(table, tables)
+            columns = [r[1] for r in db_rows(self.data_dir, f"PRAGMA table_info({table})")]
+            self.assertEqual(columns, ["day", table == "page_views" and "path" or "host", "views"])
+        _, resp, _ = self.req("GET", "/", headers={"User-Agent": BROWSER_UA})
+        self.assertIsNone(resp.getheader("Set-Cookie"), "counting a visit sets no cookie")
+
+
+class AnalyticsReportTests(ServerCase):
+    ENV = {"CONTACT_LIMIT_PER_10MIN": "1000"}
+
+    def test_admin_only_and_period_validation(self):
+        self.assertEqual(self.json("GET", "/api/admin/analytics")[0], 401)
+        self.assertEqual(self.json("GET", "/api/admin/analytics?days=30")[0], 401)
+        cookie, _ = self.login()
+        for bad in ("5", "abc", "0", "-7", "365", "30.0"):
+            status, data, _ = self.json("GET", f"/api/admin/analytics?days={bad}", cookie=cookie)
+            self.assertEqual(status, 400, bad)
+            self.assertIn("الفترة", data["error"])
+        for days in (7, 30, 90):
+            status, data, resp = self.json("GET", f"/api/admin/analytics?days={days}", cookie=cookie)
+            self.assertEqual(status, 200, data)
+            self.assertEqual(resp.getheader("Cache-Control"), "no-store")
+            self.assertEqual(len(data["daily"]), days)
+            self.assertEqual(data["daily"][-1]["date"], shop_day())
+            self.assertEqual([d["date"] for d in data["daily"]], [shop_day(i) for i in range(days - 1, -1, -1)])
+            for key in ("totals", "top_pages", "top_products", "referrers", "orders_last30", "contact_last30"):
+                self.assertIn(key, data)
+            self.assertEqual(set(data["totals"]), {"today", "last7", "last30"})
+
+    def test_aggregation_over_periods(self):
+        from datetime import datetime, timedelta, timezone
+        cookie, _ = self.login()
+        db_exec(self.data_dir, "DELETE FROM page_views")
+        db_exec(self.data_dir, "DELETE FROM referrers")
+        db_exec(self.data_dir, "INSERT INTO page_views(day,path,views) VALUES(?,?,?)", [
+            (shop_day(0), "/", 5), (shop_day(3), "/products", 7), (shop_day(3), "/", 1), (shop_day(10), "/product/wavy-03", 4),
+            (shop_day(12), "/product/%D9%85%D8%AD%D8%B0%D9%88%D9%81", 2), (shop_day(40), "/about", 9), (shop_day(100), "/faq", 50),
+            (shop_day(-1), "/", 99),  # a future day (clock change) is not part of any period
+        ])
+        db_exec(self.data_dir, "INSERT INTO referrers(day,host,views) VALUES(?,?,?)", [
+            (shop_day(0), "google.com", 3), (shop_day(5), "google.com", 1), (shop_day(10), "instagram.com", 2), (shop_day(40), "bing.com", 6)])
+        # orders and messages: two recent ones each (through the API) and one older than 30 days (written directly)
+        product_id = self.json("GET", "/api/products")[1]["products"][0]["id"]
+        for _ in range(2):
+            status, data, _ = self.json("POST", "/api/orders", {"name": "عميل", "phone": "0551234567", "city": "جدة", "consent": True,
+                                                                "items": [{"product_id": product_id, "quantity": 1}]})
+            self.assertEqual(status, 201, data)
+            self.assertEqual(self.json("POST", "/api/contact", {"name": "عميل", "phone": "0551234567", "message": "استفسار عن الستائر", "consent": True})[0], 201)
+        old = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat(timespec="seconds")
+        db_exec(self.data_dir, "INSERT INTO orders(order_number,customer_name,phone,city,created_at,updated_at) VALUES('OLD-1','قديم','0500000000','جدة',?,?)", [(old, old)])
+        db_exec(self.data_dir, "INSERT INTO messages(name,phone,message,consent_at,created_at) VALUES('قديم','0500000000','رسالة قديمة',?,?)", [(old, old)])
+
+        get = lambda days: self.json("GET", f"/api/admin/analytics?days={days}", cookie=cookie)[1]  # noqa: E731
+        week = get(7)
+        self.assertEqual(week["totals"], {"today": 5, "last7": 13, "last30": 19})
+        self.assertEqual((week["daily"][-1]["views"], week["daily"][-4]["views"], sum(d["views"] for d in week["daily"])), (5, 8, 13))
+        self.assertEqual(week["top_pages"], [{"path": "/products", "views": 7}, {"path": "/", "views": 6}])
+        self.assertEqual(week["top_products"], [])
+        self.assertEqual(week["referrers"], [{"host": "google.com", "views": 4}])
+        self.assertEqual((week["orders_last30"], week["contact_last30"]), (2, 2))
+
+        month = get(30)
+        self.assertEqual(month["totals"], week["totals"])
+        self.assertEqual(month["top_pages"][:3], [{"path": "/products", "views": 7}, {"path": "/", "views": 6}, {"path": "/product/wavy-03", "views": 4}])
+        self.assertEqual(month["top_products"][0], {"slug": "wavy-03", "name": "ستائر ويفي تفصيل حسب الطلب — موديل 3", "views": 4})
+        self.assertEqual(month["top_products"][1], {"slug": "محذوف", "name": "", "views": 2}, "a deleted product keeps its slug, without a name")
+        self.assertEqual(month["referrers"], [{"host": "google.com", "views": 4}, {"host": "instagram.com", "views": 2}])
+
+        quarter = get(90)
+        self.assertEqual(quarter["top_pages"][0], {"path": "/about", "views": 9})
+        self.assertNotIn("/faq", [p["path"] for p in quarter["top_pages"]], "100 days ago is outside 90 days")
+        self.assertEqual(quarter["referrers"][0], {"host": "bing.com", "views": 6})
+        self.assertEqual(sum(d["views"] for d in quarter["daily"]), 28)
+        self.assertEqual(quarter["totals"], week["totals"])
+
+    def test_admin_page_has_the_statistics_screen(self):
+        _, _, body = self.req("GET", "/admin/")
+        html = body.decode()
+        self.assertIn('data-page="analytics"', html)
+        self.assertIn("الإحصاءات", html)
+        self.assertIn("/api/admin/analytics?days=", html)
+        self.assertIn("احصاءات مجمعة بلا ملفات تعريف ارتباط ولا بيانات شخصية", html)
+
+
+class AnalyticsPruneTests(unittest.TestCase):
+    def test_statistics_older_than_400_days_are_pruned_at_startup(self):
+        data_dir = tempfile.mkdtemp(prefix="fakhama-test-")
+        env = {"ADMIN_PASSWORD": "Z" + secrets.token_urlsafe(16)}
+        try:
+            ServerCase.start_server.__func__(ServerCase, data_dir=data_dir, env=env)
+            ServerCase.stop_server.__func__(ServerCase, remove_data=False)
+            rows = [(shop_day(n), "/", n + 1) for n in (0, 1, 398, 399, 400, 401, 1000)]
+            db_exec(data_dir, "INSERT INTO page_views(day,path,views) VALUES(?,?,?)", rows)
+            db_exec(data_dir, "INSERT INTO referrers(day,host,views) VALUES(?,?,?)", [(d, "google.com", v) for d, _, v in rows])
+            ServerCase.start_server.__func__(ServerCase, data_dir=data_dir, env=env)
+            kept = sorted(r[0] for r in db_rows(data_dir, "SELECT day FROM page_views"))
+            self.assertEqual(kept, sorted(shop_day(n) for n in (0, 1, 398, 399)))
+            self.assertEqual(sorted(r[0] for r in db_rows(data_dir, "SELECT day FROM referrers")), kept)
+        finally:
+            ServerCase.stop_server.__func__(ServerCase)
+
+
+def csp_of(resp) -> dict[str, str]:
+    return {part.split(" ", 1)[0]: part.split(" ", 1)[1] if " " in part else "" for part in resp.getheader("Content-Security-Policy").split("; ")}
+
+
+# what a page must not contain while no GA4 ID / verification token is set (the storefront script itself may mention them)
+NO_GOOGLE_MARKUP = ('id="consentBanner"', 'id="cookieSettings"', '<meta name="google-site-verification"', "data-ga4-id",
+                    'src="https://www.googletagmanager.com')
+GA_HOSTS = ("https://*.google-analytics.com", "https://*.analytics.google.com", "https://*.googletagmanager.com")
+STOREFRONT_PATHS = ("/", "/products", "/categories", "/category/curtains", "/product/wavy-03", "/about", "/contact", "/faq", "/no-such-page")
+
+
+class GoogleSettingsTests(ServerCase):
+    def put(self, body, cookie, csrf):
+        return self.json("PUT", "/api/admin/settings", body, cookie=cookie, csrf=csrf)
+
+    def test_settings_are_validated(self):
+        cookie, csrf = self.login()
+        for bad in ("UA-12345-1", "G-", "G-abc", "G-12", "G-<script>", "G-1234567890123456", "javascript:alert(1)", "G-AB12 CD", "AW-123456789"):
+            status, data, _ = self.put({"ga4_id": bad}, cookie, csrf)
+            self.assertEqual(status, 400, bad)
+            self.assertIn("G-", data["error"])
+        for bad in ("short", "has spaces inside it", '"><script>alert(1)</script>', "a" * 121, '<meta name="x" content="bad value!">'):
+            self.assertEqual(self.put({"google_site_verification": bad}, cookie, csrf)[0], 400, bad)
+        settings = self.json("GET", "/api/admin/settings", cookie=cookie)[1]["settings"]
+        self.assertEqual((settings["ga4_id"], settings["google_site_verification"]), ("", ""), "rejected values are not stored")
+        status, data, _ = self.put({"ga4_id": " g-ab12cd34ef ", "google_site_verification": '<meta name="google-site-verification" content="Abc_DEF-123456789xyz" />'}, cookie, csrf)
+        self.assertEqual(status, 200, data)
+        self.assertEqual((data["settings"]["ga4_id"], data["settings"]["google_site_verification"]), ("G-AB12CD34EF", "Abc_DEF-123456789xyz"))
+        status, data, _ = self.put({"google_site_verification": "google-site-verification=TxtStyle_token-0123"}, cookie, csrf)
+        self.assertEqual(data["settings"]["google_site_verification"], "TxtStyle_token-0123")
+        # one invalid value rejects the whole update (nothing half-saved)
+        self.assertEqual(self.put({"tagline": "لن تُحفظ", "ga4_id": "bad"}, cookie, csrf)[0], 400)
+        self.assertNotEqual(self.json("GET", "/api/store")[1]["tagline"], "لن تُحفظ")
+        status, data, _ = self.put({"ga4_id": "", "google_site_verification": ""}, cookie, csrf)
+        self.assertEqual((data["settings"]["ga4_id"], data["settings"]["google_site_verification"]), ("", ""))
+        self.assertEqual(self.json("PUT", "/api/admin/settings", {"ga4_id": "G-ABCD1234"})[0], 401)
+
+    def test_nothing_changes_without_a_ga4_id(self):
+        for path in STOREFRONT_PATHS + ("/privacy", "/terms", "/admin/", "/offline.html"):
+            status, resp, body = self.req("GET", path, headers={"User-Agent": BROWSER_UA})
+            nonce = re.search(r"'nonce-([^']+)'", resp.getheader("Content-Security-Policy")).group(1)
+            self.assertEqual(resp.getheader("Content-Security-Policy"),
+                             "default-src 'self'; img-src 'self' data:; style-src 'self' 'nonce-" + nonce + "'; style-src-attr 'unsafe-inline'; "
+                             "script-src 'self' 'nonce-" + nonce + "'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; "
+                             "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'", path)
+            html = body.decode()
+            for absent in NO_GOOGLE_MARKUP:
+                self.assertNotIn(absent, html, (path, absent))
+        privacy = self.req("GET", "/privacy")[2].decode()
+        self.assertNotIn("Google Analytics", privacy)
+        self.assertIn("إحصاءات الزيارات", privacy, "the first-party statistics are disclosed")
+        self.assertIn("لا نستخدم ملفات تعريف ارتباط للتتبع أو للإعلانات", privacy)
+
+    def test_ga4_widens_the_csp_of_storefront_pages_only_and_adds_the_banner(self):
+        cookie, csrf = self.login()
+        self.assertEqual(self.put({"ga4_id": "G-TEST12345", "google_site_verification": "Verify_Token-1234567890"}, cookie, csrf)[0], 200)
+        try:
+            for path in STOREFRONT_PATHS:
+                status, resp, body = self.req("GET", path, headers={"User-Agent": BROWSER_UA})
+                self.assertEqual(status, 404 if path == "/no-such-page" else 200, path)
+                csp = csp_of(resp)
+                nonce = re.search(r"'nonce-([^']+)'", csp["script-src"]).group(1)
+                self.assertEqual(csp["script-src"], f"'self' 'nonce-{nonce}' https://www.googletagmanager.com", path)
+                self.assertEqual(csp["connect-src"], "'self' " + " ".join(GA_HOSTS), path)
+                self.assertEqual(csp["img-src"], "'self' data: " + " ".join(GA_HOSTS), path)
+                self.assertEqual(csp["default-src"], "'self'")
+                self.assertNotIn("unsafe", csp["script-src"] + csp["style-src"])
+                html = body.decode()
+                head = html.split("</head>", 1)[0]
+                self.assertEqual(head.count('<meta name="google-site-verification" content="Verify_Token-1234567890">'), 1, path)
+                banner = re.search(r'<section class="consent-banner"[^>]*>.*?</section>', html, re.S)
+                self.assertTrue(banner, path)
+                tag = banner.group(0)
+                for needle in ('role="region"', 'aria-labelledby="consentTitle"', 'data-ga4-id="G-TEST12345"', " hidden>", 'href="/privacy"',
+                               '<button type="button" class="btn consent-btn" id="consentAccept">قبول</button>',
+                               '<button type="button" class="btn consent-btn" id="consentReject">رفض</button>', "Google Analytics"):
+                    self.assertIn(needle, tag, (path, needle))
+                self.assertIn('id="cookieSettings" hidden>إعدادات ملفات التعريف</button>', html)
+                # nothing from Google is in the markup itself: gtag.js is only created by the script after «قبول»
+                self.assertNotIn("<script async src=\"https://www.googletagmanager.com", html)
+                for script in re.findall(r"<script\b[^>]*>", html):
+                    if "ld+json" not in script:
+                        self.assertIn(f'nonce="{nonce}"', script)
+                        self.assertNotIn("src=", script)
+                self.assertFalse(handler_attributes(html), path)
+            for path in ("/admin/", "/admin", "/admin/no-such-page", "/offline.html", "/privacy", "/terms"):
+                _, resp, body = self.req("GET", path)
+                self.assertNotIn("google", resp.getheader("Content-Security-Policy"), path)
+                self.assertNotIn('id="consentBanner"', body.decode(), path)
+            for path in ("/privacy", "/terms"):
+                self.assertIn('<meta name="google-site-verification" content="Verify_Token-1234567890">', self.req("GET", path)[2].decode(), path)
+            self.assertNotIn('<meta name="google-site-verification"', self.req("GET", "/admin/")[2].decode())
+            privacy = self.req("GET", "/privacy")[2].decode()
+            self.assertIn("Google Analytics (بموافقتك فقط)", privacy)
+            for needle in ("https://policies.google.com/privacy", "إعدادات ملفات التعريف", "«رفض»", "_ga", "سحب الموافقة", "من يعالج البيانات", "ما الذي يُجمع"):
+                self.assertIn(needle, privacy, needle)
+            self.assertNotIn("Google Analytics", self.req("GET", "/terms")[2].decode())
+            # the storefront script loads gtag.js only on «قبول», with the page nonce and Consent Mode defaults
+            shell = (ROOT / "index.html").read_text(encoding="utf-8")
+            for needle in ("fakhama-consent-v1", "s.nonce=PAGE_NONCE", "gtag('consent','default'", "analytics_storage:'denied'",
+                           "gtag('consent','update',{analytics_storage:'granted'})", "if(state==='granted')loadAnalytics(id)"):
+                self.assertIn(needle, shell, needle)
+        finally:
+            self.put({"ga4_id": "", "google_site_verification": ""}, cookie, csrf)
+        _, resp, body = self.req("GET", "/")
+        self.assertNotIn("google", resp.getheader("Content-Security-Policy"))
+        for absent in NO_GOOGLE_MARKUP:
+            self.assertNotIn(absent, body.decode(), absent)
+
+    def test_a_bad_value_in_the_database_never_reaches_a_page(self):
+        db_exec(self.data_dir, "UPDATE settings SET value='G-X\" onload=\"alert(1)' WHERE key='ga4_id'")
+        db_exec(self.data_dir, "UPDATE settings SET value='\"><script>alert(1)</script>' WHERE key='google_site_verification'")
+        try:
+            _, resp, body = self.req("GET", "/")
+            html = body.decode()
+            self.assertNotIn("google", resp.getheader("Content-Security-Policy"))
+            for absent in NO_GOOGLE_MARKUP:
+                self.assertNotIn(absent, html, absent)
+            self.assertNotIn("alert(1)", html)
+        finally:
+            db_exec(self.data_dir, "UPDATE settings SET value='' WHERE key IN ('ga4_id','google_site_verification')")
+
+
+def zip_members(raw: bytes) -> dict[str, bytes]:
+    import io
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        return {name: zf.read(name) for name in zf.namelist()}
+
+
+def table_counts_of(db_file: Path) -> dict[str, int]:
+    import sqlite3
+    conn = sqlite3.connect(db_file)
+    try:
+        names = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+        return {n: conn.execute(f'SELECT COUNT(*) FROM "{n}"').fetchone()[0] for n in names}
+    finally:
+        conn.close()
+
+
+class BackupDownloadTests(ServerCase):
+    def test_backup_endpoints_need_the_admin(self):
+        for path in ("/api/admin/backup.zip", "/api/admin/backups"):
+            status, resp, body = self.req("GET", path)
+            self.assertEqual(status, 401, path)
+            self.assertNotIn(b"SQLite", body)
+            self.assertNotIn("zip", resp.getheader("Content-Type"))
+        self.assertEqual(self.req("GET", "/api/admin/backup.zip", headers={"Cookie": "fakhama_admin=forged"})[0], 401)
+
+    def test_backup_zip_contents_headers_and_audit(self):
+        import hashlib
+        import sqlite3
+        cookie, csrf = self.login()
+        status, up, _ = self.json("POST", "/api/admin/upload", {"data": data_uri("image/png", PNG)}, cookie=cookie, csrf=csrf)
+        self.assertEqual(status, 201, up)
+        self.assertEqual(self.json("POST", "/api/contact", {"name": "عميل", "phone": "0551234567", "message": "سؤال عن الأقمشة", "consent": True})[0], 201)
+        status, resp, raw = self.req("GET", "/api/admin/backup.zip", cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(resp.getheader("Content-Type"), "application/zip")
+        self.assertRegex(resp.getheader("Content-Disposition"), r'^attachment; filename="fakhama-backup-\d{8}-\d{6}\.zip"$')
+        self.assertEqual(resp.getheader("Cache-Control"), "no-store")
+        self.assertEqual(resp.getheader("X-Content-Type-Options"), "nosniff")
+        self.assertIn("noindex", resp.getheader("X-Robots-Tag"))
+        self.assertEqual(int(resp.getheader("Content-Length")), len(raw))
+        members = zip_members(raw)
+        upload_name = up["url"].rsplit("/", 1)[1]
+        self.assertEqual(set(members), {"store.db", "manifest.json", f"uploads/{upload_name}"})
+        self.assertEqual(members[f"uploads/{upload_name}"], PNG)
+        manifest = json.loads(members["manifest.json"])
+        self.assertEqual((manifest["app"], manifest["format"], manifest["uploads"]), ("fakhama-store", 1, 1))
+        self.assertEqual(manifest["version"], self.json("GET", "/api/health")[1]["version"])
+        self.assertRegex(manifest["created_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+        self.assertEqual(manifest["store_db_sha256"], hashlib.sha256(members["store.db"]).hexdigest())
+        self.assertEqual(members["store.db"][18:20], b"\x01\x01", "a self-contained file (rollback journal, not WAL)")
+        work = Path(tempfile.mkdtemp(prefix="fakhama-test-"))
+        try:
+            (work / "store.db").write_bytes(members["store.db"])
+            counts = table_counts_of(work / "store.db")
+            self.assertEqual(manifest["tables"], counts)
+            self.assertEqual((counts["products"], counts["messages"], counts["admins"]), (18, 1, 1))
+            for table in ("page_views", "referrers", "audit_log", "settings", "orders", "order_items", "categories", "product_images"):
+                self.assertIn(table, counts)
+            conn = sqlite3.connect(work / "store.db")
+            self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            conn.close()
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        _, audit, _ = self.json("GET", "/api/admin/audit", cookie=cookie)
+        entry = next(e for e in audit["entries"] if e["action"] == "backup_download")
+        self.assertEqual(entry["actor"], "admin")
+        self.assertRegex(entry["detail"], r"^fakhama-backup-\d{8}-\d{6}\.zip: \d+ bytes, \d+ rows, 1 uploads$")
+        self.assertFalse([p for p in Path(self.data_dir).iterdir() if p.name.startswith((".backup-", ".download-"))], "temporary files are removed")
+
+    def test_backup_list_shows_archives_on_the_server(self):
+        cookie, _ = self.login()
+        status, data, _ = self.json("GET", "/api/admin/backups", cookie=cookie)
+        self.assertEqual((status, data["backups"], data["auto_backup"], data["keep"]), (200, [], False, 14))
+        folder = Path(self.data_dir) / "backups"
+        folder.mkdir(exist_ok=True)
+        for name in ("store-20260101-010101.db", "uploads-20260101-010101.tar.gz", "pre-restore-20260102-020202.zip", "notes.txt", "secret.db"):
+            (folder / name).write_bytes(b"x" * 10)
+        _, data, _ = self.json("GET", "/api/admin/backups", cookie=cookie)
+        self.assertEqual(sorted(b["name"] for b in data["backups"]), ["pre-restore-20260102-020202.zip", "store-20260101-010101.db", "uploads-20260101-010101.tar.gz"])
+        self.assertEqual({b["kind"] for b in data["backups"]}, {"database", "uploads", "pre-restore"})
+        self.assertTrue(all(b["size"] == 10 and b["modified"] for b in data["backups"]))
+        self.assertNotIn(self.data_dir, json.dumps(data), "no server paths are exposed")
+
+
+def run_cli(data_dir: str, *args: str, port: int | None = None) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if k not in ("ADMIN_PASSWORD", "PORT", "HOST")}
+    env.update({"DATA_DIR": data_dir, "PORT": str(port or free_port()), "HOST": "127.0.0.1"})
+    return subprocess.run([sys.executable, "-I", str(ROOT / "app.py"), *args], capture_output=True, text=True, env=env, timeout=120, encoding="utf-8")
+
+
+class SqlExportTests(ServerCase):
+    def test_export_sql_has_every_table_but_no_admin_rows(self):
+        import sqlite3
+        self.assertEqual(self.json("POST", "/api/contact", {"name": "عميلة 'O\"Brien'", "phone": "0551234567", "message": "سطر أول\nسطر ثانٍ; DROP TABLE x;--", "consent": True})[0], 201)
+        self.req("GET", "/about", headers={"User-Agent": BROWSER_UA, "Referer": "https://www.google.com/"})
+        out_dir = Path(tempfile.mkdtemp(prefix="fakhama-test-"))
+        try:
+            result = run_cli(self.data_dir, "export-sql", str(out_dir / "dump.sql"))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            dump = (out_dir / "dump.sql").read_text(encoding="utf-8")
+            password_hash = db_rows(self.data_dir, "SELECT password_hash FROM admins")[0][0]
+            self.assertNotIn(password_hash, dump)
+            self.assertNotIn(password_hash.split("$")[1], dump)
+            self.assertNotIn('INSERT INTO "admins"', dump)
+            self.assertIn("CREATE TABLE IF NOT EXISTS admins", dump)
+            for table in ("products", "categories", "settings", "messages", "page_views", "referrers", "product_images"):
+                self.assertIn(f'INSERT INTO "{table}"', dump, table)
+            # the dump loads into an empty database: same rows everywhere, no admin account
+            imported = sqlite3.connect(":memory:")
+            imported.executescript(dump)
+            live = table_counts_of(Path(self.data_dir) / "store.db")
+            for table, count in live.items():
+                got = imported.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                self.assertEqual(got, 0 if table == "admins" else count, table)
+            self.assertEqual(imported.execute("SELECT message FROM messages ORDER BY id DESC LIMIT 1").fetchone()[0], "سطر أول\nسطر ثانٍ; DROP TABLE x;--")
+            self.assertEqual(imported.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            # stdout variant
+            result = run_cli(self.data_dir, "export-sql")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('INSERT INTO "products"', result.stdout)
+            self.assertNotIn(password_hash, result.stdout)
+            # a server started on the imported database creates a fresh admin from ADMIN_PASSWORD
+            fresh = out_dir / "fresh"
+            fresh.mkdir()
+            conn = sqlite3.connect(fresh / "store.db")
+            conn.executescript(dump)
+            conn.close()
+            new_password = "N" + secrets.token_urlsafe(16)
+            port = free_port()
+            env = {k: v for k, v in os.environ.items() if k not in ("ADMIN_PASSWORD", "ADMIN_USERNAME")}
+            env.update({"DATA_DIR": str(fresh), "PORT": str(port), "HOST": "127.0.0.1", "ADMIN_PASSWORD": new_password})
+            proc = subprocess.Popen([sys.executable, "-I", str(ROOT / "app.py")], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                for _ in range(100):
+                    try:
+                        socket.create_connection(("127.0.0.1", port), timeout=0.3).close()
+                        break
+                    except OSError:
+                        time.sleep(0.1)
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+                conn.request("POST", "/api/admin/login", body=json.dumps({"username": "admin", "password": new_password}), headers={"Content-Type": "application/json"})
+                self.assertEqual(conn.getresponse().status, 200)
+                conn.close()
+            finally:
+                proc.terminate()
+                proc.communicate(timeout=10)
+        finally:
+            shutil.rmtree(out_dir, ignore_errors=True)
+
+    def test_export_sql_without_a_database_fails_cleanly(self):
+        empty = tempfile.mkdtemp(prefix="fakhama-test-")
+        try:
+            result = run_cli(empty, "export-sql")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("لا توجد قاعدة بيانات", result.stderr)
+            self.assertEqual(run_cli(empty, "export-sql", "a.sql", "b.sql").returncode, 2)
+        finally:
+            shutil.rmtree(empty, ignore_errors=True)
+
+
+class RestoreTests(ServerCase):
+    ENV = {"CONTACT_LIMIT_PER_10MIN": "1000"}
+
+    def download_backup(self, cookie: str) -> bytes:
+        status, _, raw = self.req("GET", "/api/admin/backup.zip", cookie=cookie)
+        self.assertEqual(status, 200)
+        return raw
+
+    @staticmethod
+    def rezip(members: dict[str, bytes], target: Path, extra: dict[str, bytes] | None = None) -> Path:
+        import zipfile
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, data in {**members, **(extra or {})}.items():
+                zf.writestr(name, data)
+        return target
+
+    def test_invalid_archives_are_refused_and_nothing_changes(self):
+        import hashlib
+        cookie, _ = self.login()
+        good = zip_members(self.download_backup(cookie))
+        work = Path(tempfile.mkdtemp(prefix="fakhama-test-"))
+        try:
+            manifest = json.loads(good["manifest.json"])
+            tampered_counts = dict(manifest, tables={**manifest["tables"], "products": 999})
+            foreign = dict(manifest, app="another-app")
+            db = bytearray(good["store.db"])
+            db[-1] ^= 0xFF
+            cases = {
+                "not-a-zip.zip": None,
+                "no-manifest.zip": {"store.db": good["store.db"]},
+                "traversal.zip": {**good, "../evil.txt": b"x"},
+                "nested-traversal.zip": {**good, "uploads/../../app.py": b"x"},
+                "unexpected.zip": {**good, "app.py": b"print(1)"},
+                "counts.zip": {**good, "manifest.json": json.dumps(tampered_counts).encode()},
+                "foreign.zip": {**good, "manifest.json": json.dumps(foreign).encode()},
+                "checksum.zip": {**good, "store.db": bytes(db)},
+                "not-sqlite.zip": {**good, "store.db": b"hello", "manifest.json": json.dumps(dict(manifest, store_db_sha256=hashlib.sha256(b"hello").hexdigest())).encode()},
+                "uploads-count.zip": {**good, "uploads/extra.png": PNG},
+            }
+            before_db = hashlib.sha256((Path(self.data_dir) / "store.db").read_bytes()).hexdigest()
+            products_before = len(self.json("GET", "/api/products")[1]["products"])
+            for name, members in cases.items():
+                archive = work / name
+                if members is None:
+                    archive.write_bytes(b"this is not a zip file")
+                else:
+                    self.rezip(members, archive)
+                result = run_cli(self.data_dir, "restore", str(archive))
+                self.assertEqual(result.returncode, 1, (name, result.stdout, result.stderr))
+                self.assertIn("لم تتم الاستعادة ولم يتغير شيء", result.stderr, name)
+            self.assertEqual(hashlib.sha256((Path(self.data_dir) / "store.db").read_bytes()).hexdigest(), before_db)
+            self.assertEqual(len(self.json("GET", "/api/products")[1]["products"]), products_before)
+            self.assertFalse((Path(self.data_dir) / "backups").exists(), "no safety copy for a refused archive")
+            self.assertFalse((Path(self.data_dir) / "evil.txt").exists())
+            # a valid archive is still refused while the server answers on the configured port
+            self.rezip(good, work / "good.zip")
+            result = run_cli(self.data_dir, "restore", str(work / "good.zip"), port=self.port)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("يعمل", result.stderr)
+            self.assertEqual(run_cli(self.data_dir, "restore").returncode, 2)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_restore_round_trip(self):
+        import zipfile
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        status, up, _ = self.json("POST", "/api/admin/upload", {"data": data_uri("image/png", PNG)}, **kw)
+        self.assertEqual(status, 201, up)
+        self.assertEqual(self.json("PUT", "/api/admin/settings", {"tagline": "عبارة قبل الاستعادة"}, **kw)[0], 200)
+        self.assertEqual(self.json("POST", "/api/contact", {"name": "عميل", "phone": "0551234567", "message": "رسالة محفوظة في النسخة", "consent": True})[0], 201)
+        archive_dir = Path(tempfile.mkdtemp(prefix="fakhama-test-"))
+        archive = archive_dir / "backup.zip"
+        archive.write_bytes(self.download_backup(cookie))
+        type(self).stop_server(remove_data=False)
+        try:
+            # the shop changes after the backup: data deleted, a photo lost, a stray file added
+            db_exec(self.data_dir, "DELETE FROM messages")
+            db_exec(self.data_dir, "UPDATE settings SET value='عبارة بعد النسخة' WHERE key='tagline'")
+            db_exec(self.data_dir, "DELETE FROM product_images WHERE product_id IN (SELECT id FROM products WHERE slug='wavy-05')")
+            db_exec(self.data_dir, "DELETE FROM products WHERE slug='wavy-05'")
+            uploads = Path(self.data_dir) / "uploads"
+            photo = uploads / up["url"].rsplit("/", 1)[1]
+            photo.unlink()
+            (uploads / "stray.png").write_bytes(PNG)
+            result = run_cli(self.data_dir, "restore", str(archive))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("تمت الاستعادة", result.stdout)
+            self.assertEqual(db_rows(self.data_dir, "SELECT value FROM settings WHERE key='tagline'")[0][0], "عبارة قبل الاستعادة")
+            self.assertEqual(db_rows(self.data_dir, "SELECT message FROM messages"), [("رسالة محفوظة في النسخة",)])
+            self.assertEqual(db_rows(self.data_dir, "SELECT COUNT(*) FROM products WHERE slug='wavy-05'")[0][0], 1)
+            self.assertEqual(photo.read_bytes(), PNG)
+            self.assertFalse((uploads / "stray.png").exists())
+            self.assertFalse([p for p in Path(self.data_dir).iterdir() if p.name.startswith((".restore-", ".store.db"))], "no leftovers")
+            # the state before the restore was saved first
+            safety = list((Path(self.data_dir) / "backups").glob("pre-restore-*.zip"))
+            self.assertEqual(len(safety), 1)
+            with zipfile.ZipFile(safety[0]) as zf:
+                saved = json.loads(zf.read("manifest.json"))
+                self.assertIn("uploads/stray.png", zf.namelist())
+            self.assertEqual(saved["tables"]["messages"], 0)
+            # the restored store runs with the same admin password, data and photo
+            type(self).start_server(data_dir=self.data_dir, env={"ADMIN_PASSWORD": "ignored-for-an-existing-db"})
+            cookie, _ = self.login()
+            self.assertEqual(self.json("GET", "/api/store")[1]["tagline"], "عبارة قبل الاستعادة")
+            self.assertEqual(self.req("GET", up["url"])[0], 200)
+            self.assertEqual(self.req("GET", "/product/wavy-05")[0], 200)
+            _, data, _ = self.json("GET", "/api/admin/backups", cookie=cookie)
+            self.assertEqual([b["kind"] for b in data["backups"]], ["pre-restore"])
+        finally:
+            shutil.rmtree(archive_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

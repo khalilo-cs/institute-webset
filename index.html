@@ -837,7 +837,7 @@
     <section class="section shop-section" id="shop">
       <div class="container">
         <div class="section-head">
-          <div><span class="eyebrow">تفصيل وخيارات متنوعة</span><h2>ستائر وأقمشة لمنزلك</h2><p>ابحث بين الستائر المفصّلة والرول والشرائح والأقمشة. الأسعار المعروضة أمثلة أولية وتُؤكد بحسب المقاس والخامة.</p></div>
+          <div><span class="eyebrow">تفصيل وخيارات متنوعة</span><h2>ستائر وأقمشة لمنزلك</h2><p>ابحث بين الستائر المفصّلة والرول والشرائح والأقمشة. الأسعار تُؤكَّد بحسب المقاس والخامة.</p></div>
           <a class="text-link" href="#guide">اقرأ دليل الاختيار <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M19 12H5m7-7-7 7 7 7"/></svg></a>
         </div>
         <div class="toolbar">
@@ -900,7 +900,7 @@
       <div class="container">
         <div class="contact-card">
           <div class="contact-copy"><span class="eyebrow">نحن هنا لنساعدك</span><h2>تحتاج مساعدة في اختيار القماش؟</h2><p id="contactCopy">تواصل مع فريق المتجر للاستفسار عن المنتجات والتنسيق والتوصيل.</p></div>
-          <div class="contact-actions"><button class="btn btn-primary" id="contactCta" data-whatsapp><span id="contactCtaText">اتصل بالمتجر</span> <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11.5a8.1 8.1 0 0 1-11.9 7.1L4 20l1.4-3.8A8.1 8.1 0 1 1 20 11.5Z"/><path d="M9 9c.4 1.7 1.4 2.7 3.2 3.5"/></svg></button><a class="btn btn-outline" id="mapButton" href="https://maps.app.goo.gl/kn2kxuPujQT9raLG7?g_st=awb" target="_blank" rel="noopener">موقع المحل على الخريطة</a><a class="btn btn-outline" href="#shop">تصفح المنتجات</a></div>
+          <div class="contact-actions"><button class="btn btn-primary" id="contactCta" data-whatsapp><span id="contactCtaText">اتصل بالمتجر</span> <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2"/></svg></button><a class="btn btn-outline" id="mapButton" href="https://maps.app.goo.gl/kn2kxuPujQT9raLG7?g_st=awb" target="_blank" rel="noopener">موقع المحل على الخريطة</a><a class="btn btn-outline" href="#shop">تصفح المنتجات</a></div>
         </div>
       </div>
     </section>
@@ -920,7 +920,7 @@
   </footer>
 
   <div class="overlay" id="drawerOverlay"></div>
-  <div class="cart-drawer" id="cartDrawer" role="dialog" aria-modal="true" aria-label="سلة التسوق">
+  <div class="cart-drawer" id="cartDrawer" role="dialog" aria-modal="true" aria-label="سلة التسوق" inert>
     <div class="drawer-head"><h2>سلة التسوق <span id="drawerItemCount" style="font-size:12px;color:var(--muted);font-weight:500"></span></h2><button class="close-btn" id="cartClose" aria-label="إغلاق السلة"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
     <div class="cart-items" id="cartItems"></div>
     <div class="drawer-bottom"><div class="subtotal-row"><span>المجموع قبل التوصيل</span><span id="cartSubtotal">٠ ر.س</span></div><div class="subtotal-row" style="font-size:10px;font-weight:500;color:var(--muted);margin-top:5px"><span>رسوم التوصيل</span><span id="cartDeliveryFee">تُحدد</span></div><div class="subtotal-row" style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px"><span>الإجمالي التقديري</span><span id="cartTotal">٠ ر.س</span></div><p class="shipping-note" id="shippingNote">رسوم التوصيل — تُحدد بعد معرفة المدينة وتأكيد الطلب.</p><button class="btn btn-primary" id="checkoutBtn">أكمل الطلب</button><p class="cart-disclaimer">يُسجّل الطلب للمراجعة؛ لا يوجد تحصيل إلكتروني في هذا الإصدار.</p></div>
@@ -952,6 +952,7 @@ const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const on = (el,type,fn,opts) => {if(el)el.addEventListener(type,fn,opts)};
 const setText = (selector,text) => {const el=$(selector);if(el)el.textContent=text};
+const countAr=(n,unit='product')=>{n=Number(n)||0;const w=unit==='piece'?['قطعة واحدة','قطعتان','قطع','قطعة','لا توجد قطع']:['منتج واحد','منتجان','منتجات','منتجًا','لا توجد منتجات'];if(!n)return w[4];if(n===1)return w[0];if(n===2)return w[1];return `${amount(n)} ${n%100>=3&&n%100<=10?w[2]:w[3]}`};
 const esc = value => String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const safeLoad = (key,fallback) => {try{const value=JSON.parse(localStorage.getItem(key));return value??fallback}catch{return fallback}};
 const calmMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -978,7 +979,7 @@ function saveState(){try{localStorage.setItem('fakhama-cart-v1',JSON.stringify(c
 const visibleCategories=()=>CATEGORIES.filter(c=>PRODUCTS.some(p=>p.category===c.slug));
 function renderCategoryCards(){
   const grid=$('#categoryGrid');if(!grid||catalogState!=='ready')return;
-  grid.innerHTML=visibleCategories().map(c=>{const items=PRODUCTS.filter(p=>p.category===c.slug),cover=items[0];return `<a class="category-card" href="${esc(categoryUrl(c.slug))}"><img src="${esc(c.image||cover.thumb||cover.image)}" alt="" loading="lazy" decoding="async"><div class="category-card-content"><div><h3>${esc(c.name)}</h3><p>${items.length} منتج</p></div><span class="round-arrow">${icons.arrow}</span></div></a>`}).join('');
+  grid.innerHTML=visibleCategories().map(c=>{const items=PRODUCTS.filter(p=>p.category===c.slug),cover=items[0];return `<a class="category-card" href="${esc(categoryUrl(c.slug))}"><img src="${esc(c.image||cover.thumb||cover.image)}" alt="" loading="lazy" decoding="async"><div class="category-card-content"><div><h3>${esc(c.name)}</h3><p>${countAr(items.length)}</p></div><span class="round-arrow">${icons.arrow}</span></div></a>`}).join('');
 }
 function renderFooterCategories(){
   const box=$('#footerCategories');if(!box||catalogState!=='ready')return;
@@ -1003,6 +1004,7 @@ function emptyState(){
   return activeFilter==='all'?['لا توجد منتجات معروضة حاليًا','تواصل مع المتجر للاستفسار عن الخيارات المتاحة.']:['لم نعثر على نتيجة مطابقة','جرّب كلمة أخرى أو غيّر القسم المحدد.'];
 }
 function renderProducts(){
+  if(PAGE==='products'){const h=$('#pageTitle');if(h){h.dataset.base=h.dataset.base||h.textContent;h.textContent=showFavorites?'المفضلة':h.dataset.base;document.title=`${h.textContent} | ${STORE.name||'الفخامة للأقمشة والستائر'}`}}
   if(!productGrid)return;
   const count=$('#resultCount');
   if(catalogState==='loading'){if(!serverGrid){if(count)count.textContent='';productGrid.innerHTML='<div class="no-results"><b>جارٍ تحميل المنتجات…</b><span>لحظات قليلة.</span></div>'}return}
@@ -1014,7 +1016,7 @@ function renderProducts(){
   if(sort==='low')list.sort((a,b)=>lowKey(a)===lowKey(b)?0:lowKey(a)<lowKey(b)?-1:1);
   if(sort==='high')list.sort((a,b)=>highKey(b)-highKey(a));
   if(sort==='name')list.sort((a,b)=>a.name.localeCompare(b.name,'ar'));
-  if(count)count.textContent=`${list.length} منتجات`;
+  if(count)count.textContent=countAr(list.length);
   if(!list.length){const [title,text]=emptyState();productGrid.innerHTML=`<div class="no-results"><b>${esc(title)}</b><span>${esc(text)}</span></div>`;return}
   // re-rendering must not drop keyboard focus: remember which card control had it and focus the same one again
   const a=document.activeElement,cssq=v=>window.CSS&&CSS.escape?CSS.escape(v):String(v).replace(/["\\]/g,'\\$&');
@@ -1054,8 +1056,8 @@ function trapTab(e){
 }
 function restoreFocus(){if(lastFocus&&document.contains(lastFocus)){lastFocus.focus();lastFocus=null}}
 const drawerOpen=()=>Boolean($('#cartDrawer')&&$('#cartDrawer').classList.contains('open'));
-function openDrawer(){lastFocus=document.activeElement;renderCart();$('#cartDrawer').classList.add('open');$('#drawerOverlay').classList.add('open');document.body.classList.add('locked');$('#cartClose').focus()}
-function closeDrawer(){const was=drawerOpen();if(!was)return;$('#cartDrawer').classList.remove('open');$('#drawerOverlay').classList.remove('open');if(!$('.modal-backdrop.open'))document.body.classList.remove('locked');restoreFocus()}
+function openDrawer(){lastFocus=document.activeElement;renderCart();$('#cartDrawer').inert=false;$('#cartDrawer').classList.add('open');$('#drawerOverlay').classList.add('open');document.body.classList.add('locked');$('#cartClose').focus()}
+function closeDrawer(){const was=drawerOpen();if(!was)return;$('#cartDrawer').classList.remove('open');$('#cartDrawer').inert=true;$('#drawerOverlay').classList.remove('open');if(!$('.modal-backdrop.open'))document.body.classList.remove('locked');restoreFocus()}
 function openModal(el){if(!$('.modal-backdrop.open'))lastFocus=document.activeElement;el.classList.add('open');document.body.classList.add('locked');const focusable=el.querySelector('.modal-close,button,input,textarea');if(focusable)setTimeout(()=>focusable.focus(),60)}
 function closeModal(el){const was=el.classList.contains('open');el.classList.remove('open');if(!$('.modal-backdrop.open')&&!drawerOpen())document.body.classList.remove('locked');if(!was)return;if(el.id==='productModal')afterProductClose();if(!$('.modal-backdrop.open'))restoreFocus()}
 // Quick view puts /product/<slug> in the address bar; closing it returns to the page it was opened from.
@@ -1069,7 +1071,7 @@ function showProduct(id,opts={}){
   const imgs=p.images&&p.images.length?p.images:[{url:p.image,thumb:p.image}];
   const url=location.origin+productUrl(p);const wa='https://wa.me/?text='+encodeURIComponent(`${p.name} — ${STORE.name}\n${url}`);
   const thumbs=imgs.length>1?`<div class="gallery-thumbs" role="group" aria-label="صور المنتج">${imgs.map((im,i)=>`<button type="button" class="gthumb${i?'':' active'}" data-gindex="${i}" aria-label="الصورة ${i+1} من ${imgs.length}" aria-pressed="${i?'false':'true'}"><img src="${esc(im.thumb||im.url)}" alt="" loading="lazy" decoding="async"></button>`).join('')}</div>`:'';
-  $('#productModalContent').innerHTML=`<div class="product-modal-layout"><div class="gallery-view"><div class="modal-image"><img id="galleryMain" src="${esc(imgs[0].url)}" alt="${esc(p.alt||p.name)}" data-count="${imgs.length}"></div>${thumbs}</div><div class="modal-info"><p class="product-category">${esc(p.categoryName||'ستائر وأقمشة')}</p><h2 id="productModalTitle">${esc(p.name)}</h2><p>${esc(p.description||'')}</p><div class="modal-price">${onRequest(p)?'<span class="on-request">السعر حسب الطلب</span>':`${amount(p.price)} <span style="font-size:13px;font-weight:500;color:var(--muted)">ريال سعودي</span>`}</div><button class="btn btn-primary" type="button" data-modal-add="${esc(p.id)}" ${available?'':'disabled'}>${available?`أضف إلى السلة ${icons.arrow}`:'غير متوفر حاليًا'}</button><div class="modal-actions"><a class="btn btn-outline" href="${esc(productUrl(p))}">صفحة المنتج</a><a class="btn btn-outline" href="${esc(wa)}" target="_blank" rel="noopener">مشاركة عبر واتساب<span class="sr-only"> (يفتح في نافذة جديدة)</span></a><button class="btn btn-outline" type="button" data-copy-link="${esc(url)}">نسخ الرابط</button>${isAdmin()?`<a class="btn btn-outline" href="/admin/#products/edit/${esc(p.id)}">تعديل المنتج</a>`:''}</div><span class="modal-note">${available?(onRequest(p)?'يُفصَّل حسب الطلب؛ يؤكد المتجر المقاس والخامة والسعر قبل البدء.':`المتاح حاليًا: ${Number(p.stock)} قطعة.`):'سيظهر المنتج هنا عند توفر المخزون.'}</span></div></div>`;
+  $('#productModalContent').innerHTML=`<div class="product-modal-layout"><div class="gallery-view"><div class="modal-image"><img id="galleryMain" src="${esc(imgs[0].url)}" alt="${esc(p.alt||p.name)}" data-count="${imgs.length}"></div>${thumbs}</div><div class="modal-info"><p class="product-category">${esc(p.categoryName||'ستائر وأقمشة')}</p><h2 id="productModalTitle">${esc(p.name)}</h2><p>${esc(p.description||'')}</p><div class="modal-price">${onRequest(p)?'<span class="on-request">السعر حسب الطلب</span>':`${amount(p.price)} <span style="font-size:13px;font-weight:500;color:var(--muted)">ريال سعودي</span>`}</div><button class="btn btn-primary" type="button" data-modal-add="${esc(p.id)}" ${available?'':'disabled'}>${available?`أضف إلى السلة ${icons.arrow}`:'غير متوفر حاليًا'}</button><div class="modal-actions"><a class="btn btn-outline" href="${esc(productUrl(p))}">صفحة المنتج</a><a class="btn btn-outline" href="${esc(wa)}" target="_blank" rel="noopener">مشاركة عبر واتساب<span class="sr-only"> (يفتح في نافذة جديدة)</span></a><button class="btn btn-outline" type="button" data-copy-link="${esc(url)}">نسخ الرابط</button>${isAdmin()?`<a class="btn btn-outline" href="/admin/#products/edit/${esc(p.id)}">تعديل المنتج</a>`:''}</div><span class="modal-note">${available?(onRequest(p)?'يُفصَّل حسب الطلب؛ يؤكد المتجر المقاس والخامة والسعر قبل البدء.':`المتاح حاليًا: ${countAr(p.stock,'piece')}.`):'سيظهر المنتج هنا عند توفر المخزون.'}</span></div></div>`;
   $('#productModal').setAttribute('aria-labelledby','productModalTitle');$('#productModal').removeAttribute('aria-label');
   document.title=`${p.name} | ${STORE.name||baseTitle}`;
   if(opts.push!==false&&location.pathname!==productUrl(p)){history.pushState({pid:p.id},'',productUrl(p));productPushed=true}
@@ -1094,7 +1096,7 @@ async function copyLink(url){
 window.addEventListener('popstate',()=>{
   if(ignoreNextPop){ignoreNextPop=false;clearTimeout(ignorePopTimer);return}
   const modal=$('#productModal'),m=location.pathname.match(/^\/product\/([^/]+)/);
-  if(location.pathname!==PAGE_PATH&&m){let slug=m[1];try{slug=decodeURIComponent(slug)}catch{}const p=PRODUCTS.find(x=>x.slug===slug);if(p){showProduct(p.id,{push:false});return}}
+  if(location.pathname!==PAGE_PATH&&m){let slug=m[1];try{slug=decodeURIComponent(slug)}catch{}const p=PRODUCTS.find(x=>x.slug===slug);if(p){showProduct(p.id,{push:false});productPushed=true;return}}
   if(modal&&modal.classList.contains('open')){productPushed=false;closingFromHistory=true;closeModal(modal);closingFromHistory=false}
 });
 let orderKey=null;const newKey=()=>(window.crypto&&crypto.randomUUID?crypto.randomUUID():`${Date.now()}${Math.random().toString(16).slice(2)}`).replace(/[^A-Za-z0-9_-]/g,'');
@@ -1121,13 +1123,13 @@ function loadLiveCatalog(){
   catalogPromise=(async()=>{
     catalogState='loading';renderProducts();
     try{
-      const [pData,cData,sData]=await Promise.all([fetchJson('/api/products'),fetchJson('/api/categories'),fetchJson('/api/store')]);
+      const storeReq=fetchJson('/api/store').then(applyStoreSettings).catch(()=>{});  // footer/contact data even if the catalogue fails
+      const [pData,cData]=await Promise.all([fetchJson('/api/products'),fetchJson('/api/categories')]);await storeReq;
       PRODUCTS=pData.products.map(p=>({...p,categoryName:p.category_name||'ستائر وأقمشة',stock:Number(p.stock||0)}));
       const ids=new Set(PRODUCTS.map(p=>String(p.id)));
       cart=cart.filter(i=>i&&ids.has(String(i.id))).map(i=>({...i,qty:Math.min(Number(i.qty)||1,Number(PRODUCTS.find(p=>String(p.id)===String(i.id))?.stock||0))})).filter(i=>i.qty>0);
       favorites=favorites.filter(id=>ids.has(String(id)));saveState();
       if(cData.categories?.length)CATEGORIES=cData.categories;
-      applyStoreSettings(sData);
       catalogState='ready';
     }catch(error){
       console.info('Storefront API unavailable.',error);catalogState='error';
@@ -1143,7 +1145,8 @@ const whenCatalog=()=>catalogState==='loading'&&catalogPromise?catalogPromise:Pr
 function markNav(){
   const path=(PAGE_PATH.replace(/\/+$/,'')||'/').replace(/^\/index\.html$/,'/');
   const target=PAGE==='home'?'/':PAGE==='category'?'/categories':PAGE==='product'?'/products':path;
-  $$('#mainNav a').forEach(a=>{if(a.getAttribute('href')===target)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')});
+  const value=PAGE==='product'||PAGE==='category'?'true':'page';
+  $$('#mainNav a').forEach(a=>{if(a.getAttribute('href')===target)a.setAttribute('aria-current',value);else a.removeAttribute('aria-current')});
 }
 // --- header search: a real GET form to /products?q=; pages with a catalogue grid filter live while typing
 function syncSearchUrl(){
@@ -1188,9 +1191,9 @@ function initContactForm(){
       const res=await fetch('/api/contact',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:ctrl.signal});
       let body={};try{body=await res.json()}catch{}
       if(!res.ok)throw new Error(body.error||'تعذّر إرسال الرسالة. حاول مرة أخرى بعد قليل أو اتصل بالمتجر هاتفيًا.');
-      form.reset();say('success','شكرًا لك، وصلت رسالتك إلى المتجر. للاستفسار العاجل اتصل بالمتجر هاتفيًا.');toast('تم إرسال رسالتك');
+      form.reset();say('success','شكرًا لك، وصلت رسالتك إلى المتجر. للاستفسار العاجل اتصل بالمتجر هاتفيًا.');toast('تم إرسال رسالتك');status?.focus();
     }catch(err){
-      say('error',err&&err.name!=='AbortError'&&err.message&&!/fetch|network/i.test(err.message)?err.message:'تعذّر الاتصال بالمتجر. تحقق من الإنترنت ثم حاول مرة أخرى، أو اتصل بالمتجر هاتفيًا.');
+      say('error',err&&err.name!=='AbortError'&&err.message&&!/fetch|network/i.test(err.message)?err.message:'تعذّر الاتصال بالمتجر. تحقق من الإنترنت ثم حاول مرة أخرى، أو اتصل بالمتجر هاتفيًا.');status?.focus();
     }finally{clearTimeout(timer);if(button){button.disabled=false;button.removeAttribute('aria-busy')}form.removeAttribute('aria-busy')}
   });
 }
@@ -1210,7 +1213,13 @@ document.addEventListener('click',async e=>{
 on($('#filterList'),'click',e=>{const b=e.target.closest('[data-filter]');if(!b)return;activeFilter=b.dataset.filter;showFavorites=false;syncChips();updateCounts();renderProducts();syncSearchUrl()});
 on($('#sortSelect'),'change',renderProducts);
 $$('#mainNav a').forEach(a=>a.addEventListener('click',()=>{$('#mainNav').classList.remove('open');$('#menuToggle')?.setAttribute('aria-expanded','false')}));
-on($('#menuToggle'),'click',()=>{const open=$('#mainNav').classList.toggle('open');$('#menuToggle').setAttribute('aria-expanded',String(open))});
+on($('#menuToggle'),'click',()=>{const open=$('#mainNav').classList.toggle('open');$('#menuToggle').setAttribute('aria-expanded',String(open));if(open)setTimeout(()=>$('#mainNav a')?.focus(),30)});
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Escape')return;
+  const nav=$('#mainNav'),bar=$('#searchBar');
+  if(nav&&nav.classList.contains('open')){nav.classList.remove('open');$('#menuToggle')?.setAttribute('aria-expanded','false');$('#menuToggle')?.focus()}
+  if(bar&&bar.classList.contains('open')){bar.classList.remove('open');$('#searchToggle')?.setAttribute('aria-expanded','false');$('#searchToggle')?.focus()}
+});
 on($('#searchToggle'),'click',()=>{const open=$('#searchBar').classList.toggle('open');$('#searchToggle').setAttribute('aria-expanded',String(open));if(open)setTimeout(()=>$('#searchInput').focus(),50)});
 on($('#favoritesToggle'),'click',()=>{
   // favourites are listed on a page with the full catalogue grid; elsewhere the button opens /products?favorites=1
@@ -1289,7 +1298,7 @@ function initConsent(){
     banner.hidden=false;root.classList.add('has-consent');reserve();
     if(focus)$('#consentAccept')?.focus();
   };
-  const hide=()=>{banner.hidden=true;root.classList.remove('has-consent');root.style.removeProperty('--consent-h');if(returnFocus&&returnFocus.isConnected)returnFocus.focus();returnFocus=null};
+  const hide=()=>{banner.hidden=true;root.classList.remove('has-consent');root.style.removeProperty('--consent-h');const inside=banner.contains(document.activeElement)||document.activeElement===document.body;if(returnFocus&&returnFocus.isConnected)returnFocus.focus();else if(inside)$('#main')?.focus({preventScroll:true});returnFocus=null};
   const choose=value=>{
     try{localStorage.setItem(CONSENT_KEY,value)}catch{}
     if(value==='granted')loadAnalytics(id);else revokeAnalytics(id);
@@ -1354,6 +1363,8 @@ if('serviceWorker' in navigator&&!/AlfakhamahApp\//.test(navigator.userAgent))wi
       });
     }
     tag(document);
+    // shown at once (no slide): a moving card would make a mouse click's release land on another element
+    document.addEventListener('focusin',e=>{const r=e.target.closest&&e.target.closest('.rv:not(.in)');if(r){r.style.animation='none';r.classList.add('in');io.unobserve(r)}});
     ['productGrid','categoryGrid','relatedGrid'].forEach(id=>{const g=document.getElementById(id);g&&new MutationObserver(()=>tag(g)).observe(g,{childList:true})});
 
     addEventListener('beforeprint',()=>document.querySelectorAll('.rv').forEach(el=>el.classList.add('in')));

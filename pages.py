@@ -26,7 +26,7 @@ FAQ = [
     ("ما أنواع الستائر التي يوفرها المتجر؟",
      "بحسب معلومات المتجر، تشمل الخيارات تفصيل أنواع مختلفة من الستائر، وستائر رول، وشرائح معدنية، وستائر كهربائية. أكّد توفر القماش والموديل والقياسات مباشرة مع المتجر."),
     ("هل الأسعار نهائية للستائر المفصلة؟",
-     "السعر المعروض في الموقع توضيحي، وقد يتغير حسب القماش والمقاس والطبقات والإكسسوارات. يراجع فريق المتجر تفاصيل القياس ويؤكد السعر النهائي قبل اعتماد العمل."),
+     "يُحدَّد السعر النهائي للستائر المفصّلة بحسب القماش والمقاس والطبقات والإكسسوارات. يراجع فريق المتجر تفاصيل القياس ويؤكد السعر النهائي قبل اعتماد العمل."),
     ("كيف أطلب تفصيل ستارة؟",
      "اختر المنتج أو نوع القماش وأرسل طلبك من الموقع مع بيانات التواصل والمدينة. يتواصل المتجر لتأكيد نوع القماش والمقاس والسعر وموعد التجهيز قبل اعتماد التفصيل."),
     ("هل توجد ستائر كهربائية؟",
@@ -92,6 +92,29 @@ def store_name(settings: dict) -> str:
 def arabic_number(value: int) -> str:
     """1450 -> '١٬٤٥٠' (what Intl.NumberFormat('ar-SA') prints in the storefront script)."""
     return f"{int(value):,}".replace(",", "٬").translate(_DIGITS)
+
+def count_ar(n: int, unit: str = "product") -> str:
+    """Arabic number agreement: منتج واحد / منتجان / ٣ منتجات / ١١ منتجًا (and قطعة / قطعتان / قطع / قطعة)."""
+    n = int(n or 0)
+    one, two, few, many, zero = {"product": ("منتج واحد", "منتجان", "منتجات", "منتجًا", "لا توجد منتجات"),
+                                 "piece": ("قطعة واحدة", "قطعتان", "قطع", "قطعة", "لا توجد قطع")}[unit]
+    if n == 0: return zero
+    if n == 1: return one
+    if n == 2: return two
+    return f"{arabic_number(n)} {few if 3 <= n % 100 <= 10 else many}"
+
+
+def fill_store(document: str, settings: dict) -> str:
+    """The footer's city and phone come from the settings in the HTML itself (no-JS visitors and crawlers never
+    see the template's placeholders)."""
+    city = settings.get("city") or "جدة"
+    out = document.replace("<span data-store-city>أضف المدينة</span>", f"<span data-store-city>{esc(city)}</span>")
+    phone = settings.get("phone") or ""
+    tel = re.sub(r"[^\d+]", "", phone)
+    contact = (f'<a href="tel:{esc(tel)}" dir="ltr">{esc(phone)}</a>' if len(re.sub(r"\D", "", tel)) >= 6
+               else esc(settings.get("whatsapp") or "تواصل معنا من صفحة التواصل"))
+    return out.replace('id="storeContact">أضف رقم الهاتف أو واتساب</span>', f'id="storeContact">{contact}</span>')
+
 
 
 def on_request(product: dict) -> bool:
@@ -197,7 +220,7 @@ def category_card(c: dict) -> str:
     """Same look as the home page's category cards; the photo is decorative (the heading names the link)."""
     return (f'<a class="category-card" href="{esc(category_path(c["slug"]))}">'
             f'<img src="{esc(c.get("cover") or "")}" alt="" loading="lazy" decoding="async">'
-            f'<div class="category-card-content"><div><h3>{esc(c["name"])}</h3><p>{int(c.get("count") or 0)} منتج</p></div>'
+            f'<div class="category-card-content"><div><h3>{esc(c["name"])}</h3><p>{count_ar(c.get("count") or 0)}</p></div>'
             f'<span class="round-arrow">{ARROW}</span></div></a>')
 
 
@@ -217,7 +240,7 @@ def shop_section(products: list[dict], *, heading: str, filters: list[dict] | No
     cards = "".join(product_card(p) for p in products) or no_results(*empty)
     return (f'<section class="section shop-section" id="shop" aria-labelledby="shopTitle"><div class="container">'
             f'<h2 class="sr-only" id="shopTitle">{esc(heading)}</h2>'
-            f'<div class="toolbar">{chips}<span class="result-count" id="resultCount" aria-live="polite">{len(products)} منتجات</span>'
+            f'<div class="toolbar">{chips}<span class="result-count" id="resultCount" aria-live="polite">{count_ar(len(products))}</span>'
             f'<label><span class="sr-only">ترتيب المنتجات</span><select class="sort-select" id="sortSelect">{SORT_OPTIONS}</select></label></div>'
             f'<div class="product-grid" id="productGrid" aria-live="polite">{cards}</div>'
             '<p class="product-footnote" id="productFootnote">«السعر حسب الطلب» يعني أن السعر يُحدَّد بعد تأكيد المقاس والخامة. '
@@ -277,7 +300,7 @@ def render_products(settings: dict, products: list[dict], categories: list[dict]
     shown = [p for p in products if search_matches(p, term)] if term else products
     store = store_name(settings)
     if term:
-        intro = f"نتائج البحث عن «{esc(term)}»: {len(shown)} منتج. امسح البحث لعرض كل المنتجات."
+        intro = f"نتائج البحث عن «{esc(term)}»: {count_ar(len(shown))}. امسح البحث لعرض كل المنتجات."
     else:
         intro = (f"ستائر وأقمشة {esc(store)} في {esc(settings.get('city') or 'جدة')}. ابحث ورتّب واختر القسم، "
                  "وافتح أي منتج لمشاهدة صوره وتفاصيله.")
@@ -317,7 +340,7 @@ def render_category(settings: dict, category: dict, categories: list[dict], prod
     """/category/<slug> — hero with the category's name, description and image, switcher, then its products."""
     description = (category.get("description") or "").strip()
     intro = text_lines(description) if description else (
-        f"{len(products)} منتج في قسم {esc(category['name'])} من {esc(store_name(settings))}.")
+        f"{count_ar(len(products))} في قسم {esc(category['name'])} من {esc(store_name(settings))}.")
     backdrop = category.get("image") or (products[0].get("image") if products else "") or ""
     hero = page_hero([HOME_CRUMB, ("الأقسام", "/categories"), (category["name"], None)], eyebrow="قسم", title=category["name"],
                      intro_html=intro, media=backdrop)
@@ -360,7 +383,7 @@ def render_product(settings: dict, product: dict, related: list[dict], base: str
     elif on_request(product):
         stock = '<p class="product-page-stock">متاح للتفصيل حسب الطلب</p>'
     else:
-        stock = f'<p class="product-page-stock">متوفر — المتاح حاليًا: {int(product["stock"])} قطعة</p>'
+        stock = f'<p class="product-page-stock">متوفر — المتاح حاليًا: {count_ar(product["stock"], "piece")}</p>'
     if available:
         add = f'<button class="btn btn-primary" type="button" data-add-product="{pid}">أضف إلى السلة {ARROW}</button>'
     else:
@@ -453,7 +476,7 @@ def contact_form(values: dict | None = None, notice: tuple[str, str] | None = No
             '<span>أوافق على <a href="/privacy" target="_blank" rel="noopener">سياسة الخصوصية<span class="sr-only"> (تفتح في نافذة جديدة)</span></a> '
             'وعلى استخدام بياناتي للرد على رسالتي.</span></label>'
             '<button class="btn btn-primary" type="submit">إرسال الرسالة</button>'
-            f'<p id="contactStatus" class="form-status" role="status" aria-live="polite"{status_attr}>{esc(message)}</p>'
+            f'<p id="contactStatus" class="form-status" role="status" aria-live="polite" tabindex="-1"{status_attr}>{esc(message)}</p>'
             '</form>')
 
 

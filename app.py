@@ -1148,7 +1148,7 @@ class StoreHandler(BaseHTTPRequestHandler):
             schemas=[seo.store_schema(settings, base, ready, DEFAULT_SHARE_IMAGE), seo.website_schema(settings, base)],
             site_name=store, preload_image=DEFAULT_SHARE_IMAGE, image_alt=store, verification=seo.site_verification(settings))
         ga4 = self.storefront_ga4(settings)
-        markup = pages.fill_consent(pages.fill_home_faq(page), ga4)
+        markup = pages.fill_store(pages.fill_consent(pages.fill_home_faq(page), ga4), settings)
         self.count_page_view("/")
         self.render_html(markup, analytics=bool(ga4))
 
@@ -1170,7 +1170,7 @@ class StoreHandler(BaseHTTPRequestHandler):
             verification=seo.site_verification(settings))
         nav_path = path if page in ("products", "categories", "about", "contact", "faq") else ""
         ga4 = self.storefront_ga4(settings)
-        markup = pages.fill_consent(pages.fill_shell(document, main, page, attrs, nav_path=nav_path, search=search), ga4)
+        markup = pages.fill_store(pages.fill_consent(pages.fill_shell(document, main, page, attrs, nav_path=nav_path, search=search), ga4), settings)
         if status == 200 and path:
             self.count_page_view(path)  # the page's own path: no query string (a search term never reaches the statistics)
         self.render_html(markup, status, headers, analytics=bool(ga4))
@@ -1463,7 +1463,8 @@ class StoreHandler(BaseHTTPRequestHandler):
             if not gallery: raise APIError("أضف صورة للمنتج.")
             if len(gallery) > MAX_GALLERY: raise APIError(f"الحد الأقصى {MAX_GALLERY} صورة لكل منتج.")
             image = gallery[0][0]
-            slug_base = slugify(str(data.get("slug", name)))
+            # An existing product keeps its URL (shared links must not break) unless a new slug is given explicitly.
+            slug_base = slugify(str(data["slug"])) if data.get("slug") else (old["slug"] if old else slugify(name))
             slug = slug_base
             n = 2
             while True:

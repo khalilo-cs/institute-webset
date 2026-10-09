@@ -1126,7 +1126,7 @@ class StorePagesTests(ServerCase):
         self.assertIn('<div class="filter-list" id="filterList" role="group" aria-label="تصفية حسب القسم">', main)
         self.assertIn('data-filter="all"', main)
         self.assertIn('data-filter="curtains"', main)
-        self.assertIn('<span class="result-count" id="resultCount" aria-live="polite">18 منتجات</span>', main)
+        self.assertIn('<span class="result-count" id="resultCount" aria-live="polite">١٨ منتجًا</span>', main)
         self.assertIn('<select class="sort-select" id="sortSelect">', main)
         for value in ("featured", "low", "high", "name"):
             self.assertIn(f'<option value="{value}">', main)
@@ -1152,7 +1152,7 @@ class StorePagesTests(ServerCase):
         index = re.search(r'<div class="category-grid" id="categoryIndex">(.*?)</div></section>', main_of(html), re.S).group(1)
         self.assertEqual(index.count('class="category-card"'), 1, "only categories that hold products")
         self.assertIn('href="/category/curtains"', index)
-        self.assertIn("<h3>ستائر تفصيل</h3><p>18 منتج</p>", index)
+        self.assertIn("<h3>ستائر تفصيل</h3><p>١٨ منتجًا</p>", index)
         self.assertEqual(self.page("/category/fabrics")[0], 200, "an active category without products still answers")
         self.assertIn('content="noindex,nofollow"', self.page("/category/fabrics")[2])
         self.assertIn("لا توجد منتجات في هذا القسم حاليًا", main_of(self.page("/category/fabrics")[2]))
@@ -1266,7 +1266,7 @@ class StorePagesTests(ServerCase):
         self.assertRegex(form, r'<input type="checkbox" name="consent" value="1" required>')
         self.assertIn('href="/privacy"', form)
         self.assertRegex(form, r'<div class="hp" aria-hidden="true">.*<input id="contactWebsite" name="website" type="text" tabindex="-1" autocomplete="off">')
-        self.assertIn('<p id="contactStatus" class="form-status" role="status" aria-live="polite">', form)
+        self.assertIn('<p id="contactStatus" class="form-status" role="status" aria-live="polite" tabindex="-1">', form)
         self.assertRegex(main, r'<noscript>.*tel:\+966576486491.*</noscript>')
         # opening hours and WhatsApp appear once the owner sets them
         cookie, csrf = self.login()
@@ -1715,6 +1715,32 @@ class ReviewFixTests(ServerCase):
             self.assertNotIn('rel="canonical"', html, path)
             self.assertNotIn('og:url" content=""', html, path)
 
+    def test_arabic_counts_agree_with_the_number(self):
+        sys.path.insert(0, str(ROOT))
+        import pages
+        self.assertEqual([pages.count_ar(n) for n in (0, 1, 2, 3, 10, 11, 18, 103)],
+                         ["لا توجد منتجات", "منتج واحد", "منتجان", "٣ منتجات", "١٠ منتجات", "١١ منتجًا", "١٨ منتجًا", "١٠٣ منتجات"])
+        self.assertEqual(pages.count_ar(1, "piece"), "قطعة واحدة")
+
+    def test_footer_store_details_are_server_rendered(self):
+        html = self.req("GET", "/about")[2].decode()
+        self.assertNotIn("<span data-store-city>أضف المدينة", html)
+        self.assertIn("<span data-store-city>جدة</span>", html)
+        self.assertNotIn('id="storeContact">أضف رقم الهاتف', html)
+        self.assertIn('href="tel:+966576486491"', html)
+
+    def test_editing_a_product_keeps_its_url(self):
+        cookie, csrf = self.login()
+        kw = dict(cookie=cookie, csrf=csrf)
+        products = self.json("GET", "/api/admin/products", cookie=cookie)[1]["products"]
+        p = next(x for x in products if x["slug"] == "wavy-03")
+        body = {k: p[k] for k in ("name", "category", "price", "stock", "description", "sku", "badge", "alt")}
+        body.update(name=p["name"] + " (معدّل)", images=[{"url": i["url"], "thumb": i.get("thumb")} for i in p["images"]], active=True)
+        status, data, _ = self.json("PUT", f"/api/admin/products/{p['id']}", body, **kw)
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["product"]["slug"], "wavy-03")
+        self.assertEqual(self.req("GET", "/product/wavy-03")[0], 200)
+
     def test_store_schema_has_no_inlanguage_and_item_list_count_matches(self):
         sys.path.insert(0, str(ROOT))
         import seo
@@ -2019,7 +2045,7 @@ class AnalyticsReportTests(ServerCase):
         self.assertIn('data-page="analytics"', html)
         self.assertIn("الإحصاءات", html)
         self.assertIn("/api/admin/analytics?days=", html)
-        self.assertIn("احصاءات مجمعة بلا ملفات تعريف ارتباط ولا بيانات شخصية", html)
+        self.assertIn("إحصاءات مجمّعة بلا ملفات تعريف ارتباط ولا بيانات شخصية", html)
 
 
 class AnalyticsPruneTests(unittest.TestCase):

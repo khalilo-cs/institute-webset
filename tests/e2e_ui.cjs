@@ -50,7 +50,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // Click a link (or press a key in a form) and return the HTTP response of the page it leads to.
   const follow = async (pg, action) => { const [resp] = await Promise.all([pg.waitForNavigation(), action()]); return resp; };
   const catalogReady = pg => pg.waitForFunction(() => typeof catalogState !== 'undefined' && catalogState === 'ready');
-  const currentNav = pg => pg.$$eval('#mainNav a[aria-current="page"]', as => as.map(a => a.getAttribute('href')));
+  // "page" on the list page itself, "true" for its section (a product or category page inside it)
+  const currentNav = pg => pg.$$eval('#mainNav a[aria-current]:not([aria-current="false"])', as => as.map(a => a.getAttribute('href')));
   const oneH1 = async (pg, text) => {
     const h1s = await pg.$$eval('h1', els => els.map(e => e.textContent.trim()));
     assert.strictEqual(h1s.length, 1, 'exactly one h1: ' + JSON.stringify(h1s));

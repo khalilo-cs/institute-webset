@@ -97,7 +97,10 @@ ORDER_LIMIT = (int(os.environ.get("ORDER_LIMIT_PER_10MIN", "10")), 600)  # publi
 CONTACT_LIMIT = (int(os.environ.get("CONTACT_LIMIT_PER_10MIN", "5")), 600)  # accepted contact messages per client per 10 minutes
 CONTACT_MAX_BODY = 32 * 1024
 MESSAGE_STATUSES = {"new": "جديدة", "handled": "تمت المتابعة"}
-EMAIL_RE = re.compile(r"[^\s@<>\"'(),;:]+@[^\s@<>\"'(),;:]+\.[^\s@<>\"'(),;:]{2,}")
+# A plain address only: no ? & = % # / \ that could add headers (bcc=, body=) to the admin's mailto: link.
+EMAIL_RE = re.compile(r"[A-Za-z0-9.!$*+_~'-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+# Invisible characters that let a sender disguise how a name reads in the inbox (bidi overrides, zero-width marks).
+INVISIBLE_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]")
 # Server-rendered store pages (pages.py) and the URL path each one answers on.
 PAGE_ROUTES = {"/products": "products", "/categories": "categories", "/about": "about", "/contact": "contact", "/faq": "faq"}
 STATIC_PREFIXES = ("/assets/", "/uploads/", "/icons/")
@@ -649,10 +652,20 @@ def message_dict(row: sqlite3.Row) -> dict:
 
 def clean_message(data: dict) -> dict:
     """Validate a contact-form submission. Raises APIError (400) with an Arabic message; returns the values to store."""
-    def text(key: str) -> str:
+    def text(key: str, multiline: bool = False) -> str:
         value = data.get(key, "")
-        return value.strip() if isinstance(value, str) else ""
-    name, email, message = text("name"), text("email"), text("message")
+        if not isinstance(value, str):
+            return ""
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:  # lone surrogates from JSON escapes
+            raise APIError("النص يحتوي على رموز غير صالحة.")
+        value = unicodedata.normalize("NFC", value.replace("\r\n", "\n").replace("\r", "\n"))
+        value = INVISIBLE_RE.sub("", value)
+        keep = "\n\t" if multiline else ""
+        value = "".join(c for c in value if c in keep or unicodedata.category(c) != "Cc")
+        return value.strip()
+    name, email, message = text("name"), text("email"), text("message", multiline=True)
     raw_phone = data.get("phone", "")
     raw_phone = str(raw_phone).strip() if isinstance(raw_phone, (str, int)) and not isinstance(raw_phone, bool) else ""
     # Arabic-Indic digits typed on an Arabic keyboard count too; a leading + is kept.
@@ -803,7 +816,7 @@ class StoreHandler(BaseHTTPRequestHandler):
             client = [t.strip() for t in self.headers.get("If-None-Match", "").split(",")]
             if etag in client or etag.removeprefix("W/") in [c.removeprefix("W/") for c in client]:
                 status, body = 304, b""
-        if status == 200 and compressible and len(body) >= 800 and "gzip" in self.headers.get("Accept-Encoding", "") and "Content-Encoding" not in out:
+        if status not in (204, 304) and compressible and len(body) >= 800 and "gzip" in self.headers.get("Accept-Encoding", "") and "Content-Encoding" not in out:
             body = gzip.compress(body, 6, mtime=0)
             out["Content-Encoding"] = "gzip"
             if etag and not etag.startswith("W/"):
@@ -907,7 +920,7 @@ class StoreHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(max(0, length))
         try:
             data = json.loads(raw.decode("utf-8") or "{}")
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             raise APIError("تعذر قراءة بيانات الطلب.", 400)
         if not isinstance(data, dict):
             raise APIError("صيغة بيانات الطلب غير صالحة.", 400)
@@ -1047,7 +1060,17 @@ class StoreHandler(BaseHTTPRequestHandler):
         """Public contact form (POST /api/contact). JSON from the storefront script -> 201 {"ok": true}; a plain HTML form
         post (no JavaScript) gets the contact page back with the result. A filled honeypot ("website") is accepted
         silently and stored nowhere. Accepted messages are rate-limited per client."""
-        is_form = self.headers.get("Content-Type", "").split(";")[0].strip().lower() == "application/x-www-form-urlencoded"
+        ctype = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        is_form = ctype == "application/x-www-form-urlencoded"
+        # Only the shop's own pages may post: another site cannot make its visitors' browsers send messages.
+        origin = self.headers.get("Origin", "")
+        own_hosts = {self.headers.get("Host", "").lower(), urlsplit(self.base_url()).netloc.lower()}
+        if TRUST_PROXY and self.headers.get("X-Forwarded-Host"):
+            own_hosts.add(self.headers["X-Forwarded-Host"].split(",")[0].strip().lower())
+        if self.headers.get("Sec-Fetch-Site", "") == "cross-site" or (origin and origin != "null" and urlsplit(origin).netloc.lower() not in own_hosts):
+            self.send_json({"error": "الطلب من مصدر غير مسموح."}, 403); return
+        if not is_form and ctype != "application/json":
+            self.send_json({"error": "صيغة الطلب غير مدعومة."}, 415); return
         data: dict = {}
         try:
             if is_form:
@@ -1628,7 +1651,7 @@ class StoreHandler(BaseHTTPRequestHandler):
             for token in [t for t, s in SESSIONS.items() if s["username"] == session["username"] and t != session["token"]]:
                 SESSIONS.pop(token, None)
             self.send_json({"ok": True}); return
-        message_match = re.fullmatch(r"/api/admin/messages/(\d+)", path)
+        message_match = re.fullmatch(r"/api/admin/messages/(\d{1,18})", path)
         if message_match and self.command == "DELETE":
             session = self.require_admin(write=True)
             if not session: return
@@ -1647,12 +1670,12 @@ class StoreHandler(BaseHTTPRequestHandler):
 
     def route_patch(self) -> None:
         path = urlsplit(self.path).path
-        message_match = re.fullmatch(r"/api/admin/messages/(\d+)", path)
+        message_match = re.fullmatch(r"/api/admin/messages/(\d{1,18})", path)
         if message_match:
             session = self.require_admin(write=True)
             if not session: return
             new_status = self.read_json().get("status")
-            if new_status not in MESSAGE_STATUSES: raise APIError("حالة الرسالة غير صالحة.")
+            if not isinstance(new_status, str) or new_status not in MESSAGE_STATUSES: raise APIError("حالة الرسالة غير صالحة.")
             message_id = int(message_match.group(1))
             with connect_db() as conn:
                 row = conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()

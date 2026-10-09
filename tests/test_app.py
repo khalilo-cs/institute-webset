@@ -6,6 +6,7 @@ touches a real store.db / uploads folder and the in-memory rate limiters never l
 from __future__ import annotations
 
 import base64
+import gzip
 import http.client
 import json
 import os
@@ -846,11 +847,8 @@ class StandardsTests(ServerCase):
         self.assertIn('content="noindex,nofollow"', page, "stays noindex until the owner marks the store ready")
         blocks = [json.loads(b) for b in re.findall(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', page, re.S)]
         types = [b["@type"] for b in blocks]
-        self.assertIn("Product", types)
-        self.assertIn("BreadcrumbList", types)
-        product = next(b for b in blocks if b["@type"] == "Product")
-        self.assertNotIn("offers", product, "price on request: no invented price")
-        self.assertEqual(product["sku"], "FAL-WAV-003")
+        # price on request: no invented price, and no Product item without an Offer (Google rejects it as invalid)
+        self.assertEqual(types, ["BreadcrumbList"])
         # unknown product -> 404 + noindex, still a usable storefront
         status, resp, body = self.req("GET", "/product/does-not-exist")
         self.assertEqual(status, 404)
@@ -1083,7 +1081,7 @@ class StorePagesTests(ServerCase):
 
     def test_structured_data_and_meta_per_page(self):
         expected = {"/products": {"BreadcrumbList", "CollectionPage"}, "/categories": {"BreadcrumbList", "CollectionPage"},
-                    "/category/curtains": {"BreadcrumbList", "CollectionPage"}, "/product/wavy-03": {"Product", "BreadcrumbList"},
+                    "/category/curtains": {"BreadcrumbList", "CollectionPage"}, "/product/wavy-03": {"BreadcrumbList"},
                     "/about": {"BreadcrumbList", "AboutPage"}, "/contact": {"BreadcrumbList", "ContactPage"}, "/faq": {"BreadcrumbList", "FAQPage"}}
         for path, types in expected.items():
             _, _, html = self.page(path, headers={"Host": "shop.example.org"})
@@ -1117,7 +1115,7 @@ class StorePagesTests(ServerCase):
             status, _, html = self.page("/no-such-page")
             self.assertEqual(status, 404)
             self.assertIn('content="noindex,nofollow"', html)
-            self.assertIn('<link id="canonicalLink" rel="canonical">', html)
+            self.assertNotIn('rel="canonical"', html, "noindex pages carry no (empty) canonical link")
         finally:
             self.json("PUT", "/api/admin/settings", {"site_ready": False}, cookie=cookie, csrf=csrf)
 
@@ -1649,6 +1647,81 @@ class ShellUnitTests(unittest.TestCase):
         self.assertEqual(title, "ق | S")
         self.assertIn("3 منتج", description)
 
+
+
+class ReviewFixTests(ServerCase):
+    """Regression tests for the findings of the security/server review of the new pages."""
+    ENV = {"CONTACT_LIMIT_PER_10MIN": "1000"}
+    VALID = {"name": "عميل المراجعة", "phone": "0551234567", "message": "سؤال عن ستائر الرول للمكتب", "consent": True}
+
+    def post(self, headers=None, **fields):
+        return self.json("POST", "/api/contact", {**self.VALID, **fields}, headers=headers)
+
+    def latest(self) -> dict:
+        cookie, _ = self.login()
+        return self.json("GET", "/api/admin/messages", cookie=cookie)[1]["messages"][0]
+
+    def test_email_cannot_carry_mailto_headers(self):
+        for email in ("victim@shop.sa?bcc=attacker%40evil.example", "a@b.sa&body=x", "a@b.sa#x", "a/b@shop.sa", "a%40b@shop.sa"):
+            self.assertEqual(self.post(email=email)[0], 400, email)
+        self.assertEqual(self.post(email="first.last+tag@mail.example.sa")[0], 201)
+
+    def test_cross_site_and_non_json_posts_are_refused(self):
+        self.assertEqual(self.post(headers={"Sec-Fetch-Site": "cross-site"})[0], 403)
+        self.assertEqual(self.post(headers={"Origin": "https://evil.example"})[0], 403)
+        self.assertEqual(self.post(headers={"Origin": f"http://127.0.0.1:{self.port}", "Host": f"127.0.0.1:{self.port}", "Sec-Fetch-Site": "same-origin"})[0], 201)
+        body = json.dumps(self.VALID).encode()
+        for ctype in ("text/plain", ""):
+            status, _, _ = self.req("POST", "/api/contact", body, headers={"Content-Type": ctype})
+            self.assertEqual(status, 415, ctype)
+
+    def test_odd_json_is_a_400_not_a_500(self):
+        self.assertEqual(self.post(name="اسم \ud800 غريب")[0], 400)
+        huge = b'{"name":"ab","phone":' + b"9" * 4400 + b',"message":"hello","consent":true}'
+        self.assertEqual(self.req("POST", "/api/contact", huge)[0], 400)
+        deep = b'{"name":' + b"[" * 5000 + b"]" * 5000 + b"}"
+        self.assertEqual(self.req("POST", "/api/contact", deep)[0], 400)
+
+    def test_control_and_bidi_characters_are_removed(self):
+        self.assertEqual(self.post(name="\u202eevil\u0000x\u200b", message="سطر\u0000 أول\r\nسطر\u2066 ثانٍ")[0], 201)
+        latest = self.latest()
+        self.assertEqual((latest["name"], latest["message"]), ("evilx", "سطر أول\nسطر ثانٍ"))
+        self.assertEqual(self.post(name="\u200b\u200b")[0], 400, "invisible-only names are too short")
+
+    def test_crlf_counts_as_one_character(self):
+        message = "\r\n".join(["ب" * 399] * 5)  # 1999 characters as the browser counts them, 2003 as sent
+        self.assertEqual(self.post(message=message)[0], 201)
+        self.assertNotIn("\r", self.latest()["message"])
+
+    def test_admin_message_routes_reject_bad_input_with_4xx(self):
+        self.assertEqual(self.post()[0], 201)
+        cookie, csrf = self.login()
+        mid = self.json("GET", "/api/admin/messages", cookie=cookie)[1]["messages"][0]["id"]
+        for status_value in ([], {}, ["handled"], 1, None):
+            self.assertEqual(self.json("PATCH", f"/api/admin/messages/{mid}", {"status": status_value}, cookie=cookie, csrf=csrf)[0], 400, status_value)
+        big = "9" * 20
+        self.assertEqual(self.json("PATCH", f"/api/admin/messages/{big}", {"status": "handled"}, cookie=cookie, csrf=csrf)[0], 404)
+        self.assertEqual(self.json("DELETE", f"/api/admin/messages/{big}", cookie=cookie, csrf=csrf)[0], 404)
+        self.assertEqual(self.json("DELETE", "/api/admin/messages/999999999999999999", cookie=cookie, csrf=csrf)[0], 404)
+
+    def test_error_pages_are_compressed(self):
+        status, resp, body = self.req("GET", "/no-such-page", headers={"Accept-Encoding": "gzip"})
+        self.assertEqual((status, resp.getheader("Content-Encoding")), (404, "gzip"))
+        self.assertIn("الصفحة غير موجودة", gzip.decompress(body).decode())
+
+    def test_noindex_pages_have_no_empty_canonical_or_og_url(self):
+        for path in ("/products", "/about", "/no-such-page", "/products?q=x"):
+            html = self.req("GET", path)[2].decode()
+            self.assertNotIn('rel="canonical"', html, path)
+            self.assertNotIn('og:url" content=""', html, path)
+
+    def test_store_schema_has_no_inlanguage_and_item_list_count_matches(self):
+        sys.path.insert(0, str(ROOT))
+        import seo
+        store = seo.store_schema({"store_name": "x"}, "https://shop.example", True, "")
+        self.assertNotIn("inLanguage", store)
+        listing = seo.collection_schema("https://shop.example", "/products", "n", "d", [(f"p{i}", f"/product/p{i}") for i in range(150)])["mainEntity"]
+        self.assertEqual(listing["numberOfItems"], len(listing["itemListElement"]))
 
 class SeoUnitTests(unittest.TestCase):
     def test_json_ld_cannot_break_out_of_the_script_tag(self):

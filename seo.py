@@ -113,7 +113,7 @@ def collection_schema(base: str, path: str, name: str, description: str, items: 
     """CollectionPage whose mainEntity is an ItemList of (name, path) entries (products or categories)."""
     return {"@context": "https://schema.org", "@type": "CollectionPage", "name": name, "description": description,
             "url": base + path, "inLanguage": "ar-SA",
-            "mainEntity": {"@type": "ItemList", "numberOfItems": len(items),
+            "mainEntity": {"@type": "ItemList", "numberOfItems": len(items[:100]),  # the list itself is capped at 100
                            "itemListElement": [{"@type": "ListItem", "position": i, "name": n, "url": absolute(base, p)}
                                                for i, (n, p) in enumerate(items[:100], 1)]}}
 
@@ -147,7 +147,6 @@ def store_schema(settings: dict, base: str, ready: bool, image: str) -> dict:
         "description": settings.get("seo_description", ""),
         "areaServed": {"@type": "Country", "name": "المملكة العربية السعودية"},
         "currenciesAccepted": "SAR",
-        "inLanguage": "ar-SA",
     }
     if ready:
         schema["url"] = base + "/"
@@ -173,7 +172,8 @@ def website_schema(settings: dict, base: str) -> dict:
 
 def product_schema(product: dict, settings: dict, base: str) -> list[dict]:
     """Product + BreadcrumbList (Home > Category > Product, like the page's visible breadcrumbs).
-    A price of 0 means 'price on request': no Offer is published (Google needs a real price)."""
+    A price of 0 means 'price on request': Google only accepts a Product with an Offer (or reviews/ratings, which we never
+    invent), so such products get the BreadcrumbList alone rather than an invalid Product item."""
     url = base + product_path(product["slug"])
     images = [absolute(base, i["url"]) for i in product.get("images", [])] or ([absolute(base, product.get("image", ""))] if product.get("image") else [])
     data: dict = {
@@ -193,7 +193,8 @@ def product_schema(product: dict, settings: dict, base: str) -> list[dict]:
     if product.get("category"):
         trail.append((product.get("category_name") or product["category"], category_path(product["category"])))
     trail.append((product["name"], product_path(product["slug"])))
-    return [data, breadcrumb_schema(base, trail)]
+    crumbs = breadcrumb_schema(base, trail)
+    return [data, crumbs] if "offers" in data else [crumbs]
 
 
 _REPLACEMENTS = (
@@ -203,8 +204,8 @@ _REPLACEMENTS = (
     ("og_title", re.compile(r'<meta id="ogTitle"[^>]*>'), lambda v: f'<meta id="ogTitle" property="og:title" content="{esc(v)}">'),
     ("og_description", re.compile(r'<meta id="ogDescription"[^>]*>'), lambda v: f'<meta id="ogDescription" property="og:description" content="{esc(v)}">'),
     ("og_image", re.compile(r'<meta id="ogImage"[^>]*>'), lambda v: f'<meta id="ogImage" property="og:image" content="{esc(v)}">'),
-    ("og_url", re.compile(r'<meta id="ogUrl"[^>]*>'), lambda v: f'<meta id="ogUrl" property="og:url" content="{esc(v)}">'),
-    ("canonical", re.compile(r'<link id="canonicalLink"[^>]*>'), lambda v: f'<link id="canonicalLink" rel="canonical" href="{esc(v)}">' if v else '<link id="canonicalLink" rel="canonical">'),
+    ("og_url", re.compile(r'<meta id="ogUrl"[^>]*>'), lambda v: f'<meta id="ogUrl" property="og:url" content="{esc(v)}">' if v else ""),
+    ("canonical", re.compile(r'<link id="canonicalLink"[^>]*>'), lambda v: f'<link id="canonicalLink" rel="canonical" href="{esc(v)}">' if v else ""),
 )
 
 

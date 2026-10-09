@@ -503,7 +503,7 @@
       const isNew=m.status!=='handled',wa=waNumber(m.phone),src=safePath(m.page)?m.page:'';
       const contact=[`<li><a class="msg-chip" href="${esc(telHref(m.phone))}">${ICON.phone}<span class="sr-only">اتصال بالرقم </span><span dir="ltr">${esc(m.phone)}</span></a></li>`,
         wa?`<li><a class="msg-chip" href="https://wa.me/${wa}" target="_blank" rel="noopener">${ICON.chat}<span>رد عبر واتساب</span><span class="sr-only"> (يفتح في نافذة جديدة)</span></a></li>`:'',
-        m.email?`<li><a class="msg-chip" href="mailto:${esc(m.email)}">${ICON.mail}<span class="sr-only">مراسلة البريد </span><span dir="ltr">${esc(m.email)}</span></a></li>`:''].join('');
+        m.email?`<li><a class="msg-chip" href="mailto:${esc(encodeURIComponent(m.email).replace(/%40/g,'@'))}">${ICON.mail}<span class="sr-only">مراسلة البريد </span><span dir="ltr">${esc(m.email)}</span></a></li>`:''].join('');
       const meta=[`<span>أُرسلت: <time datetime="${esc(m.created_at)}">${esc(fmtDateTime(m.created_at))}</time></span>`,
         src?`<span>من: <a href="${esc(src)}" target="_blank" rel="noopener">${esc(pageLabel(src))}</a></span>`:(m.page?`<span>من: <span dir="ltr">${esc(m.page)}</span></span>`:''),
         !isNew&&m.handled_at?`<span>عولجت: <time datetime="${esc(m.handled_at)}">${esc(fmtDateTime(m.handled_at))}</time></span>`:''].join('');
